@@ -1,6 +1,9 @@
 /**
- * 剑影江湖 v1.10.1 - 无CD无能量 v4.1
- * 修复悬浮球交互：手动处理触摸事件，避免gesture冲突
+ * 剑影江湖 v1.10.1 - 无CD无能量 v4.2
+ * 修复：用主二进制基址，不是FrameSync.code.dll
+ * 
+ * IL2CPP dump的偏移是主可执行文件的RVA
+ * Unity把所有DLL代码编译进主二进制
  */
 
 #import <mach-o/dyld.h>
@@ -43,29 +46,47 @@ static kern_return_t patchMem(void *addr, const void *data, size_t sz) {
     return KERN_SUCCESS;
 }
 
-static uint64_t findBase(const char *name) {
-    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
-        const char *n = _dyld_get_image_name(i);
-        if (n && strstr(n, name)) return (uint64_t)_dyld_get_image_header(i);
-    }
-    return 0;
+/* 关键修复：查找主可执行文件基址，不是FrameSync.code.dll */
+static uint64_t findMainBase(void) {
+    /* 方法1: _dyld_get_image_header(0) 就是主可执行文件 */
+    uint64_t mainBase = (uint64_t)_dyld_get_image_header(0);
+    const char *name = _dyld_get_image_name(0);
+    LOG(@"Main executable: %s base=0x%llx", name ? name : "null", mainBase);
+    return mainBase;
 }
 
 static void doPatch(void) {
     if (!g_base) {
-        g_base = findBase("FrameSync.code.dll");
-        if (!g_base) return;
+        g_base = findMainBase();
+        if (!g_base) {
+            LOG(@"ERROR: Cannot find main base!");
+            return;
+        }
+        LOG(@"Base=0x%llx, CheckCanUse=0x%llx, CheckIsReady=0x%llx",
+            g_base, g_base + OFF_CheckSkillAttackCanUse, g_base + OFF_CheckSkillIsReady);
+        
+        /* 保存原始指令 */
         memcpy(g_orig1, (void *)(g_base + OFF_CheckSkillAttackCanUse), 8);
         memcpy(g_orig2, (void *)(g_base + OFF_CheckSkillIsReady), 8);
+        LOG(@"Orig1: %08x %08x", g_orig1[0], g_orig1[1]);
+        LOG(@"Orig2: %08x %08x", g_orig2[0], g_orig2[1]);
     }
     uint32_t p[] = { ARM64_MOV_W0_1, ARM64_RET };
-    if (g_noCD) patchMem((void *)(g_base + OFF_CheckSkillAttackCanUse), p, 8);
-    else if (g_orig1[0]) patchMem((void *)(g_base + OFF_CheckSkillAttackCanUse), g_orig1, 8);
-    if (g_noEnergy) patchMem((void *)(g_base + OFF_CheckSkillIsReady), p, 8);
-    else if (g_orig2[0]) patchMem((void *)(g_base + OFF_CheckSkillIsReady), g_orig2, 8);
+    if (g_noCD) {
+        kern_return_t kr = patchMem((void *)(g_base + OFF_CheckSkillAttackCanUse), p, 8);
+        LOG(@"Patch CheckSkillAttackCanUse: %s", kr == KERN_SUCCESS ? "OK" : "FAIL");
+    } else if (g_orig1[0]) {
+        patchMem((void *)(g_base + OFF_CheckSkillAttackCanUse), g_orig1, 8);
+    }
+    if (g_noEnergy) {
+        kern_return_t kr = patchMem((void *)(g_base + OFF_CheckSkillIsReady), p, 8);
+        LOG(@"Patch CheckSkillIsReady: %s", kr == KERN_SUCCESS ? "OK" : "FAIL");
+    } else if (g_orig2[0]) {
+        patchMem((void *)(g_base + OFF_CheckSkillIsReady), g_orig2, 8);
+    }
 }
 
-/* ====== UI辅助 ====== */
+/* ====== UI ====== */
 static void refreshButtons(void) {
     [g_btnCD setTitle: g_noCD ? @"✅ 无CD: 开" : @"❌ 无CD: 关" forState:UIControlStateNormal];
     g_btnCD.backgroundColor = g_noCD ?
@@ -77,12 +98,7 @@ static void refreshButtons(void) {
         [UIColor colorWithRed:0.7 green:0.15 blue:0.15 alpha:0.95];
 }
 
-static void layoutPanel(void) {
-    /* 面板相对于球定位 */
-    UIView *ballView = nil;
-    for (UIView *v in [[UIApplication sharedApplication].keyWindow subviews]) {
-        if ([v isKindOfClass:NSClassFromString(@"JYJHBallView")]) { ballView = v; break; }
-    }
+static void layoutPanel(UIView *ballView) {
     if (!ballView || !g_panel) return;
     CGRect bf = ballView.frame;
     CGRect sc = [UIScreen mainScreen].bounds;
@@ -95,20 +111,34 @@ static void layoutPanel(void) {
     g_panel.frame = CGRectMake(px, py, pw, ph);
 }
 
-static void togglePanel(void) {
+static void togglePanel(UIView *ballView) {
     g_panelOpen = !g_panelOpen;
     g_panel.hidden = !g_panelOpen;
-    if (g_panelOpen) layoutPanel();
+    if (g_panelOpen) layoutPanel(ballView);
 }
 
-static void onCD(void) { g_noCD = !g_noCD; refreshButtons(); doPatch(); }
-static void onEnergy(void) { g_noEnergy = !g_noEnergy; refreshButtons(); doPatch(); }
+/* ====== Action Handler ====== */
+@interface JYJHActionHandler : NSObject
++ (instancetype)shared;
+- (void)onCD;
+- (void)onEnergy;
+@end
 
-/* ====== 悬浮球View - 手动处理触摸，不用gesture ====== */
+@implementation JYJHActionHandler
++ (instancetype)shared {
+    static JYJHActionHandler *s = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ s = [[self alloc] init]; });
+    return s;
+}
+- (void)onCD { g_noCD = !g_noCD; refreshButtons(); doPatch(); }
+- (void)onEnergy { g_noEnergy = !g_noEnergy; refreshButtons(); doPatch(); }
+@end
+
+/* ====== 悬浮球 ====== */
 @interface JYJHBallView : UIView {
     CGPoint _touchStart;
     BOOL _isDragging;
-    NSUInteger _touchCount;
 }
 @end
 
@@ -120,7 +150,6 @@ static void onEnergy(void) { g_noEnergy = !g_noEnergy; refreshButtons(); doPatch
         self.backgroundColor = [UIColor colorWithRed:0.1 green:0.5 blue:0.95 alpha:0.9];
         self.layer.cornerRadius = 22;
         self.userInteractionEnabled = YES;
-        self.multipleTouchEnabled = NO;
         
         UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 44, 44)];
         lbl.text = @"剑";
@@ -128,35 +157,26 @@ static void onEnergy(void) { g_noEnergy = !g_noEnergy; refreshButtons(); doPatch
         lbl.font = [UIFont boldSystemFontOfSize:18];
         lbl.textAlignment = NSTextAlignmentCenter;
         [self addSubview:lbl];
-        
-        _isDragging = NO;
-        _touchCount = 0;
     }
     return self;
 }
 
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
-    /* 扩大点击区域到周围8px */
-    CGRect expanded = CGRectInset(self.bounds, -8, -8);
-    return CGRectContainsPoint(expanded, point);
+    CGRect r = CGRectInset(self.bounds, -8, -8);
+    return CGRectContainsPoint(r, point);
 }
 
 - (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event {
-    [super touchesBegan:touches withEvent:event];
     UITouch *t = [touches anyObject];
     _touchStart = [t locationInView:self.superview];
     _isDragging = NO;
-    _touchCount = 1;
 }
 
 - (void)touchesMoved:(NSSet *)touches withEvent:(UIEvent *)event {
-    [super touchesMoved:touches withEvent:event];
     UITouch *t = [touches anyObject];
     CGPoint cur = [t locationInView:self.superview];
     CGFloat dx = cur.x - _touchStart.x;
     CGFloat dy = cur.y - _touchStart.y;
-    
-    /* 移动超过5px才算拖拽 */
     if (fabs(dx) > 5 || fabs(dy) > 5) {
         _isDragging = YES;
         CGRect f = self.frame;
@@ -165,34 +185,22 @@ static void onEnergy(void) { g_noEnergy = !g_noEnergy; refreshButtons(); doPatch
         f.origin.y = MAX(50, MIN(sc.size.height - f.size.height - 50, f.origin.y + dy));
         self.frame = f;
         _touchStart = cur;
-        
-        if (g_panelOpen) layoutPanel();
+        if (g_panelOpen) layoutPanel(self);
     }
 }
 
 - (void)touchesEnded:(NSSet *)touches withEvent:(UIEvent *)event {
-    [super touchesEnded:touches withEvent:event];
-    if (!_isDragging) {
-        /* 短按 = 点击，展开菜单 */
-        togglePanel();
-    }
+    if (!_isDragging) togglePanel(self);
     _isDragging = NO;
 }
 
 - (void)touchesCancelled:(NSSet *)touches withEvent:(UIEvent *)event {
-    [super touchesCancelled:touches withEvent:event];
     _isDragging = NO;
 }
 
 @end
 
 /* ====== 初始化 ====== */
-/* ====== Action Handler ====== */
-@interface JYJHActionHandler : NSObject
-+ (instancetype)shared;
-- (void)onCD;
-- (void)onEnergy;
-@end
 static void setupUI(void) {
     UIWindow *win = nil;
     for (UIWindow *w in [UIApplication sharedApplication].windows) {
@@ -208,14 +216,9 @@ static void setupUI(void) {
         return;
     }
     
-    LOG(@"keyWindow: %@", win);
-    
-    /* 悬浮球 */
     JYJHBallView *ball = [[JYJHBallView alloc] init];
     [win addSubview:ball];
-    LOG(@"Ball added at %@", NSStringFromCGRect(ball.frame));
     
-    /* 面板 */
     g_panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 180, 150)];
     g_panel.backgroundColor = [UIColor colorWithRed:0.12 green:0.12 blue:0.18 alpha:0.97];
     g_panel.layer.cornerRadius = 14;
@@ -229,43 +232,24 @@ static void setupUI(void) {
     title.textAlignment = NSTextAlignmentCenter;
     [g_panel addSubview:title];
     
-    /* 用普通UIButton + target-action，最可靠的方式 */
     g_btnCD = [UIButton buttonWithType:UIButtonTypeCustom];
     g_btnCD.frame = CGRectMake(12, 42, 156, 40);
     g_btnCD.layer.cornerRadius = 10;
+    [g_btnCD addTarget:[JYJHActionHandler shared] action:@selector(onCD) forControlEvents:UIControlEventTouchUpInside];
     [g_panel addSubview:g_btnCD];
     
     g_btnEnergy = [UIButton buttonWithType:UIButtonTypeCustom];
     g_btnEnergy.frame = CGRectMake(12, 92, 156, 40);
     g_btnEnergy.layer.cornerRadius = 10;
-    [g_panel addSubview:g_btnEnergy];
-    
-    /* 用objc_setAssociatedObject绑定handler到按钮 */
-    /* 实际上直接用addTarget更简单 */
-    [g_btnCD addTarget:[JYJHActionHandler shared] action:@selector(onCD) forControlEvents:UIControlEventTouchUpInside];
     [g_btnEnergy addTarget:[JYJHActionHandler shared] action:@selector(onEnergy) forControlEvents:UIControlEventTouchUpInside];
+    [g_panel addSubview:g_btnEnergy];
     
     refreshButtons();
 }
 
-
-@implementation JYJHActionHandler
-
-+ (instancetype)shared {
-    static JYJHActionHandler *s = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{ s = [[self alloc] init]; });
-    return s;
-}
-
-- (void)onCD { onCD(); }
-- (void)onEnergy { onEnergy(); }
-
-@end
-
 __attribute__((constructor))
 static void initialize(void) {
-    LOG(@"JYJH v4.1 loaded");
+    LOG(@"JYJH v4.2 loaded - using main executable base");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         doPatch();
