@@ -1,6 +1,6 @@
 /**
- * 剑影江湖 (com.jyjh.whwb) v1.10.1 - 无CD无能量技能插件
- * v3.6: 三指下滑呼出/隐藏 + 5秒延迟
+ * 剑影江湖 v1.10.1 - 无CD无能量 v4.0
+ * 最简方案：无延迟，直接显示悬浮球，触摸穿透
  */
 
 #import <mach-o/dyld.h>
@@ -24,13 +24,10 @@ static BOOL g_noEnergy = YES;
 static uint32_t g_orig1[2] = {0, 0};
 static uint32_t g_orig2[2] = {0, 0};
 
-static UIWindow *g_menuWin = nil;
-static UIView *g_container = nil;
 static UIButton *g_ball = nil;
 static UIView *g_panel = nil;
 static UIButton *g_btnCD = nil;
 static UIButton *g_btnEnergy = nil;
-static BOOL g_menuVisible = NO;
 static BOOL g_panelOpen = NO;
 
 /* ====== 内存补丁 ====== */
@@ -69,7 +66,7 @@ static void doPatch(void) {
     else if (g_orig2[0]) patchMem((void *)(g_base + OFF_CheckSkillIsReady), g_orig2, 8);
 }
 
-/* ====== UI辅助 ====== */
+/* ====== UI ====== */
 static void refreshButtons(void) {
     [g_btnCD setTitle: g_noCD ? @"✅ 无CD: 开" : @"❌ 无CD: 关" forState:UIControlStateNormal];
     g_btnCD.backgroundColor = g_noCD ?
@@ -94,86 +91,7 @@ static void layoutPanel(void) {
     g_panel.frame = CGRectMake(px, py, pw, ph);
 }
 
-static void showMenuView(void) {
-    g_menuVisible = YES;
-    g_container.hidden = NO;
-}
-
-static void hideMenuView(void) {
-    g_menuVisible = NO;
-    g_panelOpen = NO;
-    g_panel.hidden = YES;
-    g_container.hidden = YES;
-}
-
-/* ====== 触摸穿透容器 ====== */
-@interface JYJHPassView : UIView
-@end
-
-@implementation JYJHPassView
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    if (self.hidden) return nil;
-    for (UIView *child in self.subviews) {
-        if (child.hidden) continue;
-        CGPoint inner = [self convertPoint:point toView:child];
-        UIView *hit = [child hitTest:inner withEvent:event];
-        if (hit) return hit;
-    }
-    return nil;
-}
-@end
-
-/* ====== 自定义Window - sendEvent拦截三指下滑 ====== */
-@interface JYJHMenuWindow : UIWindow
-@end
-
-static int g_threeTouchCount = 0;
-static CGFloat g_swipeDy = 0;
-
-@implementation JYJHMenuWindow
-
-- (void)sendEvent:(UIEvent *)event {
-    [super sendEvent:event];
-    
-    if (event.type != UIEventTypeTouches) return;
-    
-    NSSet *touches = [event allTouches];
-    
-    /* 三指触摸开始 */
-    if (touches.count == 3) {
-        UITouchPhase phase = [[touches anyObject] phase];
-        
-        if (phase == UITouchPhaseBegan) {
-            g_threeTouchCount = 3;
-            g_swipeDy = 0;
-        }
-        
-        if (phase == UITouchPhaseMoved && g_threeTouchCount == 3) {
-            for (UITouch *t in touches) {
-                CGPoint prev = [t previousLocationInView:self];
-                CGPoint curr = [t locationInView:self];
-                g_swipeDy += (curr.y - prev.y);
-            }
-        }
-        
-        if (phase == UITouchPhaseEnded && g_threeTouchCount == 3) {
-            if (g_swipeDy > 50) {
-                /* 三指下滑 > 50pt: 切换菜单 */
-                if (g_menuVisible) hideMenuView();
-                else showMenuView();
-            }
-            g_threeTouchCount = 0;
-            g_swipeDy = 0;
-        }
-    } else if (touches.count != 3) {
-        g_threeTouchCount = 0;
-        g_swipeDy = 0;
-    }
-}
-
-@end
-
-/* ====== 事件处理 ====== */
+/* ====== Handler ====== */
 @interface JYJHHandler : NSObject
 - (void)tapBall;
 - (void)tapCD;
@@ -214,27 +132,31 @@ static CGFloat g_swipeDy = 0;
 
 @end
 
-/* ====== 创建菜单 ====== */
-static void setupMenu(void) {
-    if (g_menuWin) return;
+/* ====== 初始化 ====== */
+static void setupUI(void) {
+    /* 等待keyWindow可用 */
+    UIWindow *win = nil;
+    for (UIWindow *w in [UIApplication sharedApplication].windows) {
+        if (w.isKeyWindow && !w.isHidden) { win = w; break; }
+    }
+    if (!win) {
+        NSArray *ws = [UIApplication sharedApplication].windows;
+        for (UIWindow *w in ws) {
+            if (!w.isHidden) { win = w; break; }
+        }
+    }
+    if (!win) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ setupUI(); });
+        return;
+    }
+    
+    LOG(@"Got keyWindow: %@", win);
     
     JYJHHandler *h = [[JYJHHandler alloc] init];
     CGRect sc = [UIScreen mainScreen].bounds;
     
-    /* 使用自定义Window，sendEvent拦截三指手势 */
-    g_menuWin = [[JYJHMenuWindow alloc] initWithFrame:sc];
-    g_menuWin.windowLevel = UIWindowLevelStatusBar + 200;
-    g_menuWin.backgroundColor = [UIColor clearColor];
-    g_menuWin.userInteractionEnabled = YES;
-    g_menuWin.hidden = NO;
-    
-    /* 菜单容器 - 默认隐藏 */
-    g_container = [[JYJHPassView alloc] initWithFrame:sc];
-    g_container.backgroundColor = [UIColor clearColor];
-    g_container.hidden = YES;
-    [g_menuWin addSubview:g_container];
-    
-    /* 悬浮球 */
+    /* 悬浮球 - 直接加到window上，不用容器 */
     g_ball = [UIButton buttonWithType:UIButtonTypeCustom];
     g_ball.frame = CGRectMake(sc.size.width - 54, 100, 44, 44);
     g_ball.backgroundColor = [UIColor colorWithRed:0.1 green:0.5 blue:0.95 alpha:0.9];
@@ -242,17 +164,17 @@ static void setupMenu(void) {
     [g_ball setTitle:@"剑" forState:UIControlStateNormal];
     g_ball.titleLabel.font = [UIFont boldSystemFontOfSize:18];
     [g_ball addTarget:h action:@selector(tapBall) forControlEvents:UIControlEventTouchUpInside];
-    [g_container addSubview:g_ball];
+    [win addSubview:g_ball];
     
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:h action:@selector(drag:)];
     [g_ball addGestureRecognizer:pan];
     
-    /* 面板 */
+    /* 面板 - 直接加到window上 */
     g_panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 180, 150)];
     g_panel.backgroundColor = [UIColor colorWithRed:0.12 green:0.12 blue:0.18 alpha:0.97];
     g_panel.layer.cornerRadius = 14;
     g_panel.hidden = YES;
-    [g_container addSubview:g_panel];
+    [win addSubview:g_panel];
     
     UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0, 10, 180, 22)];
     title.text = @"剑影江湖 v1.10.1";
@@ -275,22 +197,16 @@ static void setupMenu(void) {
     
     refreshButtons();
     
-    /* 不抢keyWindow */
-    for (UIWindow *w in [UIApplication sharedApplication].windows) {
-        if (w != g_menuWin && !w.isHidden) {
-            [w makeKeyWindow];
-            break;
-        }
-    }
+    LOG(@"UI setup done. Ball at %@", NSStringFromCGRect(g_ball.frame));
 }
 
 __attribute__((constructor))
 static void initialize(void) {
-    LOG(@"JYJH v3.6 loaded - 5s delay + 3-finger swipe");
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+    LOG(@"JYJH v4.0 loaded - no delay, direct UI");
+    /* 3秒后初始化：等游戏启动，但不需要等太久 */
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        LOG(@"Initializing...");
         doPatch();
-        setupMenu();
+        setupUI();
     });
 }
