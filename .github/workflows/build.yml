@@ -17,89 +17,44 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq git cmake ninja-build python3 \
             libssl-dev zlib1g-dev libxml2-dev uuid-dev libbsd-dev \
-            autoconf automake libtool pkg-config
+            autoconf automake libtool pkg-config clang libc++-dev libc++abi-dev \
+            xz-utils
 
-      - name: Build cctools-port with SDK
+      - name: Get iOS SDK
         run: |
-          # Clone cctools-port
-          git clone https://github.com/tpoechtrager/cctools-port.git --depth 1 /tmp/cctools
-
-          # The build.sh script needs an Xcode .dmg to extract the SDK
-          # We use the iOS SDK from a separate repo that provides pre-extracted SDKs
-          # Download iOS 15.0 SDK from xybp1234/iOS-SDKs (community maintained)
-          git clone https://github.com/xybp1234/iOS-SDKs.git --depth 1 /tmp/sdks
-
-          # Find the iPhoneOS SDK
+          # Clone pre-extracted iOS SDK from theos/sdks
+          git clone https://github.com/theos/sdks.git --depth 1 /tmp/sdks
           ls /tmp/sdks/
-          SDK_PATH=$(find /tmp/sdks -name "iPhoneOS*" -type d | head -1)
-          echo "Found SDK: $SDK_PATH"
+          
+          # Pack SDK into tar.xz (cctools-port build.sh requires this format)
+          cd /tmp/sdks
+          tar -cJf /tmp/iPhoneOS15.6.sdk.tar.xz iPhoneOS15.6.sdk
+          ls -lh /tmp/iPhoneOS15.6.sdk.tar.xz
 
-          if [ -z "$SDK_PATH" ]; then
-            echo "ERROR: No iPhoneOS SDK found!"
-            ls -R /tmp/sdks/ | head -30
-            exit 1
-          fi
-
-          # Build cctools-port toolchain manually
-          cd /tmp/cctools
-
-          # Set target
-          TARGET=arm64-apple-darwin14
-          PREFIX=/tmp/ios-toolchain
-
-          # Build ld64
-          cd ld64
-          mkdir -p build && cd build
-          cmake .. -DCMAKE_INSTALL_PREFIX=$PREFIX \
-            -DCMAKE_OSX_SYSROOT=$SDK_PATH \
-            -DTARGET_ARCH=arm64 \
-            -DLLVM_SUPPORT=OFF
-          make -j$(nproc) && make install
-          cd ../..
-
-          # Build cctools (as, ar, nm, etc)
-          cd cctools
-          mkdir -p build && cd build
-          ../configure --target=$TARGET --prefix=$PREFIX
-          make -j$(nproc) && make install
-          cd ../..
-
-          # Install SDK
-          mkdir -p $PREFIX/SDK
-          cp -r $SDK_PATH $PREFIX/SDK/
-
-          echo "Toolchain built"
-          ls $PREFIX/bin/ 2>/dev/null || echo "No bin dir"
-
-      - name: Fallback - use prebuilt toolchain
-        if: failure()
+      - name: Build cctools-port toolchain
         run: |
-          echo "CCTools build failed, trying prebuilt toolchain..."
+          git clone https://github.com/tpoechtrager/cctools-port.git --depth 1 /tmp/cctools
           
-          # Try downloading a prebuilt iOS toolchain
-          # Option 1: from theos/devcontainers
-          mkdir -p /tmp/ios-toolchain
+          # build.sh usage: ./build.sh <SDK.tar.xz> <target_cpu>
+          # It expects the SDK as a tar.xz archive
+          cd /tmp/cctools/usage_examples/ios_toolchain
           
-          # Use Theos's prebuilt toolchain
-          git clone --recursive https://github.com/theos/theos.git /tmp/theos
-          ls /tmp/theos/toolchain/linux/iphone/
+          ./build.sh /tmp/iPhoneOS15.6.sdk.tar.xz arm64
           
-          if [ -d "/tmp/theos/toolchain/linux/iphone" ]; then
-            cp -r /tmp/theos/toolchain/linux/iphone/* /tmp/ios-toolchain/
-            echo "Theos toolchain copied"
-          fi
-          
-          # Get iOS SDK
-          git clone https://github.com/xybp1234/iOS-SDKs.git --depth 1 /tmp/sdks
-          SDK_PATH=$(find /tmp/sdks -name "iPhoneOS*" -type d | head -1)
-          mkdir -p /tmp/ios-toolchain/SDK
-          cp -r "$SDK_PATH" /tmp/ios-toolchain/SDK/
-          
-          ls /tmp/ios-toolchain/bin/ || echo "No bin"
-          ls /tmp/ios-toolchain/SDK/ || echo "No SDK"
+          # Verify toolchain
+          ls /tmp/cctools/usage_examples/ios_toolchain/target/bin/ || true
+          find /tmp/cctools -name "clang" -type f | head -5
+          find /tmp/cctools -name "ldid" -type f | head -5
 
-      - name: Build stub substrate
+      - name: Build stub libsubstrate
         run: |
+          # Find toolchain paths
+          CLANG=$(find /tmp/cctools -name "clang" -type f | head -1)
+          SDK=$(find /tmp/cctools -name "iPhoneOS*.sdk" -type d | head -1)
+          echo "clang: $CLANG"
+          echo "SDK: $SDK"
+          
+          # Create substrate header
           mkdir -p /tmp/inc
           cat > /tmp/inc/substrate.h << 'H'
           #ifndef SUBSTRATE_H_
@@ -109,33 +64,24 @@ jobs:
           #endif
           H
           
+          # Stub implementation
           cat > /tmp/stub.c << 'S'
           void MSHookFunction(void *symbol, void *replace, void **result) {}
           void *MSFindSymbol(void *image, const char *name) { return (void*)0; }
           S
-
-      - name: Build tweak
-        run: |
-          # Find clang in toolchain
-          CLANG=$(find /tmp/ios-toolchain -name "clang" -type f | head -1)
-          SDK=$(find /tmp/ios-toolchain -name "iPhoneOS*" -type d | head -1)
-          
-          if [ -z "$CLANG" ]; then
-            echo "ERROR: No clang found in toolchain!"
-            find /tmp/ios-toolchain -type f | head -20
-            exit 1
-          fi
-          
-          echo "Using clang: $CLANG"
-          echo "Using SDK: $SDK"
           
           # Build stub substrate
           $CLANG \
             -arch arm64 -miphoneos-version-min=15.0 \
             -isysroot "$SDK" \
-            -dynamiclib -o /tmp/libsubstrate.dylib /tmp/stub.c
+            -dynamiclib -o /tmp/libsubstrate.dylib \
+            /tmp/stub.c
+
+      - name: Build tweak dylib
+        run: |
+          CLANG=$(find /tmp/cctools -name "clang" -type f | head -1)
+          SDK=$(find /tmp/cctools -name "iPhoneOS*.sdk" -type d | head -1)
           
-          # Build tweak
           $CLANG \
             -arch arm64 \
             -miphoneos-version-min=15.0 \
@@ -150,12 +96,8 @@ jobs:
 
       - name: Sign and package
         run: |
-          LDID=$(find /tmp -name "ldid" -type f | head -1)
-          if [ -n "$LDID" ]; then
-            $LDID -S JYJH_NoCDNoEnergy.dylib
-          else
-            echo "ldid not found, skipping pseudo-sign"
-          fi
+          LDID=$(find /tmp/cctools -name "ldid" -type f | head -1)
+          [ -n "$LDID" ] && $LDID -S JYJH_NoCDNoEnergy.dylib
           
           echo '{ Filter = { Bundles = ( "com.jyjh.whwb" ); }; }' > JYJH_NoCDNoEnergy.plist
           mkdir -p output
@@ -163,7 +105,7 @@ jobs:
           file output/JYJH_NoCDNoEnergy.dylib
           ls -lh output/
 
-      - name: Upload
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: JYJH_NoCDNoEnergy-dylib
