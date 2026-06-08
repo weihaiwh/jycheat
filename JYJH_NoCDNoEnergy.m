@@ -1,6 +1,6 @@
 /**
  * 剑影江湖 (com.jyjh.whwb) v1.10.1 - 无CD无能量技能插件
- * v3.3: 修复触摸穿透 - 不阻挡游戏操作
+ * v3.4: 修复悬浮球点击 - hitTest直接检查区域
  */
 
 #import <mach-o/dyld.h>
@@ -91,18 +91,24 @@ static void layoutPanel(void) {
     g_panel.frame = CGRectMake(px, py, pw, ph);
 }
 
-/* ====== 触摸穿透View ====== */
+/* ====== 触摸穿透容器 ====== */
 @interface JYJHPassView : UIView
 @end
 
 @implementation JYJHPassView
 
-/* 关键：只拦截悬浮球和面板区域的触摸，其余穿透 */
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    UIView *hit = [super hitTest:point withEvent:event];
-    /* 如果点击的是悬浮球或面板内的子view，返回它 */
-    if (hit != self) return hit;
-    /* 点击空白区域 → 穿透给游戏 */
+    /* 直接检查点是否在悬浮球或面板内 */
+    if (g_ball && CGRectContainsPoint(g_ball.frame, point)) {
+        /* 转换坐标到ball内部 */
+        CGPoint inner = [self convertPoint:point toView:g_ball];
+        return [g_ball hitTest:inner withEvent:event];
+    }
+    if (g_panel && !g_panel.hidden && CGRectContainsPoint(g_panel.frame, point)) {
+        CGPoint inner = [self convertPoint:point toView:g_panel];
+        return [g_panel hitTest:inner withEvent:event];
+    }
+    /* 其他区域穿透给游戏 */
     return nil;
 }
 
@@ -170,12 +176,10 @@ static void setupMenu(void) {
     JYJHHandler *h = [[JYJHHandler alloc] init];
     CGRect sc = [UIScreen mainScreen].bounds;
     
-    /* 全屏穿透容器 - hitTest返回nil让触摸穿透 */
     JYJHPassView *container = [[JYJHPassView alloc] initWithFrame:sc];
     container.backgroundColor = [UIColor clearColor];
     [win addSubview:container];
     
-    /* 悬浮球 - 加到穿透容器里，hitTest会返回它 */
     g_ball = [UIButton buttonWithType:UIButtonTypeCustom];
     g_ball.frame = CGRectMake(sc.size.width - 54, 200, 44, 44);
     g_ball.backgroundColor = [UIColor colorWithRed:0.1 green:0.5 blue:0.95 alpha:0.9];
@@ -188,7 +192,6 @@ static void setupMenu(void) {
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:h action:@selector(drag:)];
     [g_ball addGestureRecognizer:pan];
     
-    /* 面板 - 也加到穿透容器，hitTest会返回面板内的按钮 */
     g_panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 180, 150)];
     g_panel.backgroundColor = [UIColor colorWithRed:0.12 green:0.12 blue:0.18 alpha:0.97];
     g_panel.layer.cornerRadius = 14;
@@ -219,7 +222,7 @@ static void setupMenu(void) {
 
 __attribute__((constructor))
 static void initialize(void) {
-    LOG(@"JYJH v3.3 loaded");
+    LOG(@"JYJH v3.4 loaded");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         doPatch();
