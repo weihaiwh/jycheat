@@ -1,6 +1,6 @@
 /**
- * 剑影江湖 v1.10.1 - v7.0
- * 使用IL2CPP运行时API查找方法地址
+ * 剑影江湖 v1.10.1 - v7.1
+ * IL2CPP运行时查找 - 直接读MethodInfo结构体
  */
 #import <mach-o/dyld.h>
 #import <mach/mach.h>
@@ -17,8 +17,7 @@ static NSMutableArray *g_debugLines = nil;
 static UILabel *g_debugLabel = nil;
 
 static void jlog(NSString *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
+    va_list args; va_start(args, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
     va_end(args);
     NSLog(@"[JYJH] %@", msg);
@@ -59,105 +58,114 @@ static kern_return_t patchMem(void *addr, const void *data, size_t sz) {
     return KERN_SUCCESS;
 }
 
-/* IL2CPP运行时查找 */
-typedef void* (*il2cpp_class_from_name_t)(const char*, const char*);
-typedef void* (*il2cpp_class_get_methods_t)(void*, void**);
-typedef const char* (*il2cpp_method_get_name_t)(void*);
-typedef void* (*il2cpp_method_get_pointer_t)(void*);
-typedef void* (*il2cpp_domain_get_t)(void);
-typedef void** (*il2cpp_domain_get_assemblies_t)(void*, size_t*);
-typedef void* (*il2cpp_assembly_get_image_t)(void*);
-typedef size_t (*il2cpp_image_get_class_count_t)(void*);
-typedef void* (*il2cpp_image_get_class_t)(void*, size_t);
+typedef void* (*Il2CppDomainGet)(void);
+typedef void** (*Il2CppDomainGetAssemblies)(void*, size_t*);
+typedef void* (*Il2CppAssemblyGetImage)(void*);
+typedef size_t (*Il2CppImageGetClassCount)(void*);
+typedef void* (*Il2CppImageGetClass)(void*, size_t);
+typedef void* (*Il2CppClassGetMethods)(void*, void**);
+typedef const char* (*Il2CppMethodGetName)(void*);
+
+static void* getMethodPointer(void *methodInfo) {
+    if (!methodInfo) return NULL;
+    void *ptr = NULL;
+    /* MethodInfo->methodPointer at offset 0 */
+    memcpy(&ptr, methodInfo, sizeof(void*));
+    if (ptr && (uint64_t)ptr > 0x100000000ULL) {
+        vm_size_t outSize = 0;
+        uint32_t test;
+        kern_return_t kr = vm_read_overwrite(mach_task_self(), (vm_address_t)ptr, 4, (vm_address_t)&test, &outSize);
+        if (kr == KERN_SUCCESS && test != 0 && test != 0xFFFFFFFF) {
+            return ptr;
+        }
+    }
+    /* 如果offset 0不行，dump结构体内容 */
+    uint64_t fields[4];
+    memcpy(fields, methodInfo, 32);
+    jlog(@"MethodInfo dump: %llx %llx %llx %llx", fields[0], fields[1], fields[2], fields[3]);
+    /* 尝试offset 8 */
+    memcpy(&ptr, ((char*)methodInfo) + 8, sizeof(void*));
+    if (ptr && (uint64_t)ptr > 0x100000000ULL) {
+        vm_size_t outSize = 0; uint32_t test;
+        kern_return_t kr = vm_read_overwrite(mach_task_self(), (vm_address_t)ptr, 4, (vm_address_t)&test, &outSize);
+        if (kr == KERN_SUCCESS && test != 0 && test != 0xFFFFFFFF) {
+            jlog(@"Found ptr at offset +8");
+            return ptr;
+        }
+    }
+    return NULL;
+}
 
 static void findIL2CPP(void) {
-    jlog(@"=== IL2CPP Runtime Search ===");
-    
+    jlog(@"=== IL2CPP v7.1 ===");
     void *h = dlopen(NULL, RTLD_LAZY);
     
-    /* 列出所有il2cpp导出 */
-    il2cpp_domain_get_t domain_get = dlsym(h, "il2cpp_domain_get");
-    il2cpp_domain_get_assemblies_t get_assemblies = dlsym(h, "il2cpp_domain_get_assemblies");
-    il2cpp_assembly_get_image_t get_image = dlsym(h, "il2cpp_assembly_get_image");
-    il2cpp_image_get_class_count_t class_count = dlsym(h, "il2cpp_image_get_class_count");
-    il2cpp_image_get_class_t get_class = dlsym(h, "il2cpp_image_get_class");
-    il2cpp_class_get_methods_t get_methods = dlsym(h, "il2cpp_class_get_methods");
-    il2cpp_method_get_name_t method_name = dlsym(h, "il2cpp_method_get_name");
-    il2cpp_method_get_pointer_t method_ptr = dlsym(h, "il2cpp_runtime_method_get_pointer");
-    if (!method_ptr) method_ptr = dlsym(h, "il2cpp_method_get_pointer");
+    Il2CppDomainGet domain_get = dlsym(h, "il2cpp_domain_get");
+    Il2CppDomainGetAssemblies get_assemblies = dlsym(h, "il2cpp_domain_get_assemblies");
+    Il2CppAssemblyGetImage get_image = dlsym(h, "il2cpp_assembly_get_image");
+    Il2CppImageGetClassCount class_count = dlsym(h, "il2cpp_image_get_class_count");
+    Il2CppImageGetClass get_class = dlsym(h, "il2cpp_image_get_class");
+    Il2CppClassGetMethods get_methods = dlsym(h, "il2cpp_class_get_methods");
+    Il2CppMethodGetName method_name = dlsym(h, "il2cpp_method_get_name");
     
-    jlog(@"APIs: domain=%p assemblies=%p image=%p class_count=%p get_class=%p get_methods=%p method_name=%p method_ptr=%p",
-         domain_get, get_assemblies, get_image, class_count, get_class, get_methods, method_name, method_ptr);
-    
-    if (!domain_get || !get_assemblies || !get_image || !class_count || !get_class || !get_methods || !method_name || !method_ptr) {
-        jlog(@"Missing IL2CPP APIs!");
-        return;
-    }
+    if (!domain_get || !method_name) { jlog(@"Missing APIs"); return; }
     
     void *domain = domain_get();
-    jlog(@"domain=%p", domain);
+    size_t assemCount = 0;
+    void **assemblies = get_assemblies(domain, &assemCount);
+    jlog(@"%zu assemblies", assemCount);
     
-    size_t assemblyCount = 0;
-    void **assemblies = get_assemblies(domain, &assemblyCount);
-    jlog(@"%zu assemblies", assemblyCount);
-    
-    /* 遍历所有assembly找FrameSync.code.dll */
-    for (size_t a = 0; a < assemblyCount; a++) {
-        void *image = get_image(assemblies[a]);
-        size_t cnt = class_count(image);
-        
-        for (size_t c = 0; c < cnt; c++) {
-            void *klass = get_class(image, c);
+    int found = 0;
+    for (size_t a = 0; a < assemCount && found < 3; a++) {
+        void *img = get_image(assemblies[a]);
+        size_t cnt = class_count(img);
+        for (size_t c = 0; c < cnt && found < 3; c++) {
+            void *klass = get_class(img, c);
             if (!klass) continue;
-            
             void *iter = NULL;
-            void *method = NULL;
-            while ((method = get_methods(klass, &iter)) != NULL) {
-                const char *name = method_name(method);
-                if (!name) continue;
-                
-                if (strcmp(name, "CheckSkillAttackCanUse") == 0) {
-                    g_ptrCanUse = method_ptr(method);
-                    jlog(@"FOUND CheckSkillAttackCanUse: %p", g_ptrCanUse);
+            void *m = NULL;
+            while ((m = get_methods(klass, &iter)) != NULL) {
+                const char *n = method_name(m);
+                if (!n) continue;
+                if (strcmp(n, "CheckSkillAttackCanUse") == 0 && !g_ptrCanUse) {
+                    g_ptrCanUse = getMethodPointer(m);
+                    jlog(@"CanUse: info=%p ptr=%p", m, g_ptrCanUse);
+                    if (g_ptrCanUse) {
+                        uint32_t inst[2]; memcpy(inst, g_ptrCanUse, 8);
+                        jlog(@"CanUse code: %08x %08x", inst[0], inst[1]);
+                    }
+                    found++;
                 }
-                if (strcmp(name, "CheckSkillIsReady") == 0) {
-                    g_ptrIsReady = method_ptr(method);
-                    jlog(@"FOUND CheckSkillIsReady: %p", g_ptrIsReady);
+                else if (strcmp(n, "CheckSkillIsReady") == 0 && !g_ptrIsReady) {
+                    g_ptrIsReady = getMethodPointer(m);
+                    jlog(@"IsReady: info=%p ptr=%p", m, g_ptrIsReady);
+                    if (g_ptrIsReady) {
+                        uint32_t inst[2]; memcpy(inst, g_ptrIsReady, 8);
+                        jlog(@"IsReady code: %08x %08x", inst[0], inst[1]);
+                    }
+                    found++;
                 }
-                if (strcmp(name, "get_limitDamage") == 0) {
-                    g_ptrLimitDmg = method_ptr(method);
-                    jlog(@"FOUND get_limitDamage: %p", g_ptrLimitDmg);
+                else if (strcmp(n, "get_limitDamage") == 0 && !g_ptrLimitDmg) {
+                    g_ptrLimitDmg = getMethodPointer(m);
+                    jlog(@"LimitDmg: info=%p ptr=%p", m, g_ptrLimitDmg);
+                    found++;
                 }
             }
         }
     }
-    
     jlog(@"Result: CanUse=%p IsReady=%p LimitDmg=%p", g_ptrCanUse, g_ptrIsReady, g_ptrLimitDmg);
 }
 
 static void applyPatches(void) {
     findIL2CPP();
-    
+    uint32_t ret_true[] = { 0x52800020, 0xD65F03C0 };
     if (g_ptrCanUse) {
-        uint32_t v[2]; memcpy(v, g_ptrCanUse, 8);
-        jlog(@"CanUse @%p: %08x %08x", g_ptrCanUse, v[0], v[1]);
         memcpy(g_orig1, g_ptrCanUse, 8);
+        if (g_noCD) { kern_return_t kr = patchMem(g_ptrCanUse, ret_true, 8); jlog(@"NoCD kr=%d", kr); }
     }
     if (g_ptrIsReady) {
-        uint32_t v[2]; memcpy(v, g_ptrIsReady, 8);
-        jlog(@"IsReady @%p: %08x %08x", g_ptrIsReady, v[0], v[1]);
         memcpy(g_orig2, g_ptrIsReady, 8);
-    }
-    
-    uint32_t ret_true[] = { 0x52800020, 0xD65F03C0 };
-    
-    if (g_noCD && g_ptrCanUse) {
-        kern_return_t kr = patchMem(g_ptrCanUse, ret_true, 8);
-        jlog(@"NoCD kr=%d", kr);
-    }
-    if (g_noEnergy && g_ptrIsReady) {
-        kern_return_t kr = patchMem(g_ptrIsReady, ret_true, 8);
-        jlog(@"NoEnergy kr=%d", kr);
+        if (g_noEnergy) { kern_return_t kr = patchMem(g_ptrIsReady, ret_true, 8); jlog(@"NoEnergy kr=%d", kr); }
     }
 }
 
@@ -169,8 +177,8 @@ static void patchLimitDamage(int value) {
     patch[0] = 0x52800000 | (low << 5);
     patch[1] = high ? (0x72A00000 | (high << 5)) : 0xD65F03C0;
     patch[2] = 0xD65F03C0;
-    kern_return_t kr = patchMem(g_ptrLimitDmg, patch, high ? 12 : 8);
-    jlog(@"limitDmg->%d kr=%d", value, kr);
+    patchMem(g_ptrLimitDmg, patch, high ? 12 : 8);
+    jlog(@"limitDmg->%d", value);
 }
 
 static void refreshButtons(void) {
@@ -239,7 +247,7 @@ static void setupUI(void) {
     [win addSubview:g_panel];
     
     UILabel *title=[[UILabel alloc]initWithFrame:CGRectMake(0,10,260,24)];
-    title.text=@"剑影江湖 v7.0"; title.textColor=[UIColor cyanColor];
+    title.text=@"剑影江湖 v7.1"; title.textColor=[UIColor cyanColor];
     title.font=[UIFont boldSystemFontOfSize:15]; title.textAlignment=NSTextAlignmentCenter;
     [g_panel addSubview:title];
     
@@ -274,7 +282,7 @@ static void setupUI(void) {
 __attribute__((constructor))
 static void initialize(void) {
     g_debugLines=[NSMutableArray new];
-    jlog(@"========== JYJH v7.0 ==========");
+    jlog(@"========== JYJH v7.1 ==========");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(5.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
         applyPatches();
         patchLimitDamage(g_damageLimit);
