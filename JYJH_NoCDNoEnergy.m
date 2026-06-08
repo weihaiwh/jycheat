@@ -1,9 +1,7 @@
 /**
- * 剑影江湖 v1.10.1 - v7.2
- * IL2CPP运行时查找 + 安全补丁（保留栈平衡）
- * 闪退原因：直接覆盖前8字节为MOV W0,#1;RET
- * 但原函数开头是STP(压栈)，跳过压栈直接RET导致栈不平衡
- * 修复：用完整的函数序言+返回（20字节=5条指令）
+ * 剑影江湖 v1.10.1 - v7.3
+ * 不覆盖原函数，修改MethodInfo->methodPointer指向我们分配的代码
+ * v7.2闪退原因：覆盖原函数STP指令，callee-saved寄存器未保存
  */
 #import <mach-o/dyld.h>
 #import <mach/mach.h>
@@ -12,6 +10,7 @@
 #import <stdio.h>
 #import <string.h>
 #import <dlfcn.h>
+#import <sys/mman.h>
 
 extern void sys_icache_invalidate(void *start, size_t len);
 
@@ -36,11 +35,14 @@ static void jlog(NSString *fmt, ...) {
 static BOOL g_noCD = YES;
 static BOOL g_noEnergy = YES;
 static int g_damageLimit = 10000;
-static void *g_ptrCanUse = NULL;
-static void *g_ptrIsReady = NULL;
-static void *g_ptrLimitDmg = NULL;
-static uint32_t g_orig1[8] = {0};
-static uint32_t g_orig2[8] = {0};
+static void *g_infoCanUse = NULL;
+static void *g_infoIsReady = NULL;
+static void *g_infoLimitDmg = NULL;
+static void *g_origPtrCanUse = NULL;
+static void *g_origPtrIsReady = NULL;
+static void *g_origPtrLimitDmg = NULL;
+static void *g_codeMem = NULL;
+static void *g_codeLimitDmg = NULL;
 
 static UIView *g_panel = nil;
 static UIButton *g_btnCD = nil;
@@ -88,7 +90,7 @@ static void* getMethodPointer(void *methodInfo) {
 }
 
 static void findIL2CPP(void) {
-    jlog(@"=== v7.2 ===");
+    jlog(@"=== v7.3 ===");
     void *h = dlopen(NULL, RTLD_LAZY);
     Il2CppDomainGet domain_get = dlsym(h, "il2cpp_domain_get");
     Il2CppDomainGetAssemblies get_assemblies = dlsym(h, "il2cpp_domain_get_assemblies");
@@ -112,58 +114,74 @@ static void findIL2CPP(void) {
             while ((m = get_methods(klass, &iter)) != NULL) {
                 const char *n = method_name(m);
                 if (!n) continue;
-                if (strcmp(n, "CheckSkillAttackCanUse") == 0 && !g_ptrCanUse) { g_ptrCanUse = getMethodPointer(m); jlog(@"CanUse=%p", g_ptrCanUse); found++; }
-                else if (strcmp(n, "CheckSkillIsReady") == 0 && !g_ptrIsReady) { g_ptrIsReady = getMethodPointer(m); jlog(@"IsReady=%p", g_ptrIsReady); found++; }
-                else if (strcmp(n, "get_limitDamage") == 0 && !g_ptrLimitDmg) { g_ptrLimitDmg = getMethodPointer(m); jlog(@"LimitDmg=%p", g_ptrLimitDmg); found++; }
+                if (strcmp(n, "CheckSkillAttackCanUse") == 0 && !g_infoCanUse) { g_infoCanUse = m; g_origPtrCanUse = getMethodPointer(m); jlog(@"CanUse=%p", g_origPtrCanUse); found++; }
+                else if (strcmp(n, "CheckSkillIsReady") == 0 && !g_infoIsReady) { g_infoIsReady = m; g_origPtrIsReady = getMethodPointer(m); jlog(@"IsReady=%p", g_origPtrIsReady); found++; }
+                else if (strcmp(n, "get_limitDamage") == 0 && !g_infoLimitDmg) { g_infoLimitDmg = m; g_origPtrLimitDmg = getMethodPointer(m); jlog(@"LimitDmg=%p", g_origPtrLimitDmg); found++; }
             }
         }
     }
-    jlog(@"R: CanUse=%p IsReady=%p LimitDmg=%p", g_ptrCanUse, g_ptrIsReady, g_ptrLimitDmg);
+    jlog(@"Found: CanUse=%p IsReady=%p LimitDmg=%p", g_origPtrCanUse, g_origPtrIsReady, g_origPtrLimitDmg);
 }
 
-/* 安全的return true: 完整函数序言+返回 (20字节) */
-static const uint32_t RET_TRUE_SAFE[] = {
-    0xA9BF7BFD,  /* STP X29, X30, [SP, #-16]! */
-    0x910003FD,  /* MOV X29, SP */
-    0x52800020,  /* MOV W0, #1 */
-    0xA8C17BFD,  /* LDP X29, X30, [SP], #16 */
-    0xD65F03C0   /* RET */
-};
+static int writeReturnTrue(void *addr) {
+    uint32_t *c = (uint32_t *)addr; int i = 0;
+    c[i++] = 0xA9B97BFD; c[i++] = 0xA90153F3; c[i++] = 0xA9024BF5;
+    c[i++] = 0xA90343F7; c[i++] = 0xA9043BF9; c[i++] = 0xA90533FB;
+    c[i++] = 0x52800020;
+    c[i++] = 0xA94153F3; c[i++] = 0xA9424BF5; c[i++] = 0xA94343F7;
+    c[i++] = 0xA9443BF9; c[i++] = 0xA94533FB; c[i++] = 0xA8C17BFD;
+    c[i++] = 0xD65F03C0;
+    sys_icache_invalidate(addr, i * 4);
+    return i * 4;
+}
+
+static int writeReturnValue(void *addr, int value) {
+    uint32_t *c = (uint32_t *)addr; int i = 0;
+    c[i++] = 0xA9B97BFD; c[i++] = 0xA90153F3; c[i++] = 0xA9024BF5;
+    c[i++] = 0xA90343F7; c[i++] = 0xA9043BF9; c[i++] = 0xA90533FB;
+    uint32_t low = value & 0xFFFF; uint32_t high = (value >> 16) & 0xFFFF;
+    c[i++] = 0x52800000 | (low << 5);
+    if (high) c[i++] = 0x72A00000 | (high << 5);
+    c[i++] = 0xA94153F3; c[i++] = 0xA9424BF5; c[i++] = 0xA94343F7;
+    c[i++] = 0xA9443BF9; c[i++] = 0xA94533FB; c[i++] = 0xA8C17BFD;
+    c[i++] = 0xD65F03C0;
+    sys_icache_invalidate(addr, i * 4);
+    return i * 4;
+}
 
 static void applyPatches(void) {
-    if (!g_ptrCanUse) findIL2CPP();
-    if (g_ptrCanUse && !g_orig1[0]) { memcpy(g_orig1, g_ptrCanUse, 32); jlog(@"orig1: %08x %08x %08x %08x", g_orig1[0],g_orig1[1],g_orig1[2],g_orig1[3]); }
-    if (g_ptrIsReady && !g_orig2[0]) { memcpy(g_orig2, g_ptrIsReady, 32); jlog(@"orig2: %08x %08x %08x %08x", g_orig2[0],g_orig2[1],g_orig2[2],g_orig2[3]); }
-    if (g_noCD && g_ptrCanUse) { kern_return_t kr = patchMem(g_ptrCanUse, RET_TRUE_SAFE, 20); jlog(@"NoCD kr=%d", kr); }
-    if (g_noEnergy && g_ptrIsReady) { kern_return_t kr = patchMem(g_ptrIsReady, RET_TRUE_SAFE, 20); jlog(@"NoEnergy kr=%d", kr); }
+    if (!g_infoCanUse) findIL2CPP();
+    if (!g_codeMem) {
+        g_codeMem = mmap(NULL, 4096, PROT_READ|PROT_WRITE|PROT_EXEC, MAP_PRIVATE|MAP_ANONYMOUS|MAP_JIT, -1, 0);
+        if (g_codeMem == MAP_FAILED) { jlog(@"mmap fail"); g_codeMem = NULL; return; }
+        jlog(@"codeMem=%p", g_codeMem);
+    }
+    void *c1 = g_codeMem;
+    writeReturnTrue(c1);
+    void *c2 = (char*)g_codeMem + 64;
+    writeReturnTrue(c2);
+    g_codeLimitDmg = (char*)g_codeMem + 128;
+    if (g_noCD && g_infoCanUse) {
+        kern_return_t kr = patchMem(g_infoCanUse, &c1, sizeof(void*));
+        jlog(@"CanUse->%p kr=%d", c1, kr);
+    }
+    if (g_noEnergy && g_infoIsReady) {
+        kern_return_t kr = patchMem(g_infoIsReady, &c2, sizeof(void*));
+        jlog(@"IsReady->%p kr=%d", c2, kr);
+    }
 }
 
 static void patchLimitDamage(int value) {
-    if (!g_ptrLimitDmg) return;
-    uint32_t low = value & 0xFFFF;
-    uint32_t high = (value >> 16) & 0xFFFF;
-    uint32_t patch[6]; int sz;
-    patch[0] = 0xA9BF7BFD;  /* STP X29, X30, [SP, #-16]! */
-    patch[1] = 0x910003FD;  /* MOV X29, SP */
-    patch[2] = 0x52800000 | (low << 5);  /* MOV W0, #low */
-    if (high) {
-        patch[3] = 0x72A00000 | (high << 5);
-        patch[4] = 0xA8C17BFD;
-        patch[5] = 0xD65F03C0;
-        sz = 24;
-    } else {
-        patch[3] = 0xA8C17BFD;
-        patch[4] = 0xD65F03C0;
-        sz = 20;
-    }
-    patchMem(g_ptrLimitDmg, patch, sz);
-    jlog(@"limitDmg->%d", value);
+    if (!g_infoLimitDmg || !g_codeMem) return;
+    writeReturnValue(g_codeLimitDmg, value);
+    kern_return_t kr = patchMem(g_infoLimitDmg, &g_codeLimitDmg, sizeof(void*));
+    jlog(@"LimitDmg->%p val=%d kr=%d", g_codeLimitDmg, value, kr);
 }
 
 static void refreshButtons(void) {
-    [g_btnCD setTitle: g_noCD ? @"✅ 无CD: 开" : @"❌ 无CD: 关" forState:UIControlStateNormal];
+    [g_btnCD setTitle: g_noCD ? @"\U00002705 \u65e0CD: \u5f00" : @"\U0000274c \u65e0CD: \u5173" forState:UIControlStateNormal];
     g_btnCD.backgroundColor = g_noCD ? [UIColor colorWithRed:0.15 green:0.75 blue:0.15 alpha:0.95] : [UIColor colorWithRed:0.7 green:0.15 blue:0.15 alpha:0.95];
-    [g_btnEnergy setTitle: g_noEnergy ? @"✅ 无能量: 开" : @"❌ 无能量: 关" forState:UIControlStateNormal];
+    [g_btnEnergy setTitle: g_noEnergy ? @"\U00002705 \u65e0\u80fd\u91cf: \u5f00" : @"\U0000274c \u65e0\u80fd\u91cf: \u5173" forState:UIControlStateNormal];
     g_btnEnergy.backgroundColor = g_noEnergy ? [UIColor colorWithRed:0.15 green:0.75 blue:0.15 alpha:0.95] : [UIColor colorWithRed:0.7 green:0.15 blue:0.15 alpha:0.95];
 }
 
@@ -190,9 +208,9 @@ static void togglePanel(UIView *bv) {
 @end
 @implementation JYJHActionHandler
 + (instancetype)shared { static JYJHActionHandler *s; static dispatch_once_t o; dispatch_once(&o,^{s=[[self alloc]init];}); return s; }
-- (void)onCD { g_noCD=!g_noCD; refreshButtons(); if(g_noCD) applyPatches(); else if(g_ptrCanUse && g_orig1[0]) patchMem(g_ptrCanUse, g_orig1, 20); }
-- (void)onEnergy { g_noEnergy=!g_noEnergy; refreshButtons(); if(g_noEnergy) applyPatches(); else if(g_ptrIsReady && g_orig2[0]) patchMem(g_ptrIsReady, g_orig2, 20); }
-- (void)sliderChanged:(UISlider *)s { g_damageLimit=(int)s.value; g_sliderLabel.text=[NSString stringWithFormat:@"伤害上限: %d",g_damageLimit]; patchLimitDamage(g_damageLimit); }
+- (void)onCD { g_noCD=!g_noCD; refreshButtons(); if(g_noCD) applyPatches(); else if(g_infoCanUse&&g_origPtrCanUse) patchMem(g_infoCanUse,&g_origPtrCanUse,sizeof(void*)); }
+- (void)onEnergy { g_noEnergy=!g_noEnergy; refreshButtons(); if(g_noEnergy) applyPatches(); else if(g_infoIsReady&&g_origPtrIsReady) patchMem(g_infoIsReady,&g_origPtrIsReady,sizeof(void*)); }
+- (void)sliderChanged:(UISlider *)s { g_damageLimit=(int)s.value; g_sliderLabel.text=[NSString stringWithFormat:@"\u4f24\u5bb3\u4e0a\u9650: %d",g_damageLimit]; patchLimitDamage(g_damageLimit); }
 @end
 
 @interface JYJHBallView : UIView { CGPoint _ts; BOOL _drag; }
@@ -201,7 +219,7 @@ static void togglePanel(UIView *bv) {
 - (instancetype)init {
     self=[super initWithFrame:CGRectMake([UIScreen mainScreen].bounds.size.width-54,100,44,44)];
     if(self){self.backgroundColor=[UIColor colorWithRed:0.1 green:0.5 blue:0.95 alpha:0.9];self.layer.cornerRadius=22;self.userInteractionEnabled=YES;
-    UILabel*l=[[UILabel alloc]initWithFrame:CGRectMake(0,0,44,44)];l.text=@"剑";l.textColor=[UIColor whiteColor];l.font=[UIFont boldSystemFontOfSize:18];l.textAlignment=NSTextAlignmentCenter;[self addSubview:l];}
+    UILabel*l=[[UILabel alloc]initWithFrame:CGRectMake(0,0,44,44)];l.text=@"\u5251";l.textColor=[UIColor whiteColor];l.font=[UIFont boldSystemFontOfSize:18];l.textAlignment=NSTextAlignmentCenter;[self addSubview:l];}
     return self;
 }
 - (BOOL)pointInside:(CGPoint)p withEvent:(UIEvent*)e{return CGRectContainsPoint(CGRectInset(self.bounds,-8,-8),p);}
@@ -221,7 +239,7 @@ static void setupUI(void) {
     g_panel.backgroundColor=[UIColor colorWithRed:0.08 green:0.08 blue:0.12 alpha:0.98];
     g_panel.layer.cornerRadius=14; g_panel.hidden=YES; [win addSubview:g_panel];
     UILabel *title=[[UILabel alloc]initWithFrame:CGRectMake(0,10,260,24)];
-    title.text=@"剑影江湖 v7.2"; title.textColor=[UIColor cyanColor];
+    title.text=@"\u5251\u5f71\u6c5f\u6e56 v7.3"; title.textColor=[UIColor cyanColor];
     title.font=[UIFont boldSystemFontOfSize:15]; title.textAlignment=NSTextAlignmentCenter; [g_panel addSubview:title];
     g_btnCD=[UIButton buttonWithType:UIButtonTypeCustom]; g_btnCD.frame=CGRectMake(16,42,228,36);
     g_btnCD.layer.cornerRadius=8; [g_btnCD addTarget:[JYJHActionHandler shared] action:@selector(onCD) forControlEvents:UIControlEventTouchUpInside]; [g_panel addSubview:g_btnCD];
@@ -242,7 +260,7 @@ static void setupUI(void) {
 __attribute__((constructor))
 static void initialize(void) {
     g_debugLines=[NSMutableArray new];
-    jlog(@"========== JYJH v7.2 ==========");
+    jlog(@"========== JYJH v7.3 ==========");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(5.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
         applyPatches();
         patchLimitDamage(g_damageLimit);
