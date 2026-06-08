@@ -7,165 +7,90 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-14
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Xcode iOS SDK
+      - name: Verify iOS SDK
         run: |
-          # macOS GitHub Actions runner has Xcode with iOS SDK
-          # Verify iOS SDK is available
-          xcrun --show-sdk-path --sdk iphoneos || echo "No iOS SDK"
+          SDK=$(xcrun --show-sdk-path --sdk iphoneos)
+          echo "iOS SDK: $SDK"
+          ls "$SDK/System/Library/Frameworks/Foundation.framework/Headers/" | head -5
+          xcrun -sdk iphoneos --find clang
           xcodebuild -version
-          xcrun --find clang
 
-      - name: Install Theos
+      - name: Build stub libsubstrate (for linking only)
         run: |
-          brew install ldid make
-          export THEOS="$HOME/theos"
-          git clone --recursive https://github.com/theos/theos.git "$THEOS"
-          
-          # Download libsubstrate for arm64 iOS
-          curl -sL "https://github.com/leptos-6/procursus-mis/raw/main/libsubstrate.dylib" -o "$THEOS/lib/libsubstrate.dylib" || true
-          
-          # Alternative source for substrate
-          if [ ! -f "$THEOS/lib/libsubstrate.dylib" ] || ! file "$THEOS/lib/libsubstrate.dylib" | grep -q "Mach-O"; then
-            echo "Trying alternative substrate source..."
-            # Build a minimal substrate stub
-            cat > /tmp/substrate_stub.m << 'STUBM'
-            #import <Foundation/Foundation.h>
-            @interface Substrate : NSObject
-            + (void)hookFunction:(void *)symbol withReplacement:(void *)replace andResult:(void ***)result;
-            @end
-            
-            void MSHookFunction(void *symbol, void *replace, void **result) {
-                // Stub - real implementation loaded from device's Substrate
-            }
-            void *MSFindSymbol(void *image, const char *name) {
-                return NULL;
-            }
-            STUBM
-            
-            xcrun -sdk iphoneos clang -arch arm64 \
-              -miphoneos-version-min=15.0 \
-              -dynamiclib -o "$THEOS/lib/libsubstrate.dylib" \
-              /tmp/substrate_stub.m
-          fi
-          
-          file "$THEOS/lib/libsubstrate.dylib"
-          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
-
-      - name: Build with Theos
-        run: |
-          # Create Theos-compatible Makefile
-          cat > Makefile << 'MAKEFILE'
-          export ARCHS = arm64
-          export TARGET = iphone:clang:16.0:15.0
-          
-          include $(THEOS)/makefiles/common.mk
-          
-          TWEAK_NAME = JYJH_NoCDNoEnergy
-          
-          JYJH_NoCDNoEnergy_FILES = JYJH_NoCDNoEnergy.xm
-          JYJH_NoCDNoEnergy_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
-          JYJH_NoCDNoEnergy_FRAMEWORKS = Foundation
-          JYJH_NoCDNoEnergy_LIBRARIES = substrate
-          
-          include $(THEOS_MAKE_PATH)/tweak.mk
-          MAKEFILE
-          
-          # Create plist
-          cat > JYJH_NoCDNoEnergy.plist << 'PLIST'
-          { Filter = { Bundles = ( "com.jyjh.whwb" ); }; }
-          PLIST
-          
-          make clean && make
-        env:
-          THEOS: ${{ env.THEOS }}
-
-      - name: Fallback build (direct clang)
-        if: failure()
-        run: |
-          echo "Theos build failed, using direct clang cross-compilation..."
-          
-          SDK_PATH=$(xcrun --show-sdk-path --sdk iphoneos)
-          echo "iOS SDK: $SDK_PATH"
-          
-          if [ -z "$SDK_PATH" ]; then
-            echo "ERROR: No iOS SDK found!"
-            exit 1
-          fi
-          
           # Create substrate header
-          mkdir -p /tmp/sdk_include
-          cat > /tmp/sdk_include/substrate.h << 'HEADER'
+          mkdir -p /tmp/substrate
+          cat > /tmp/substrate/substrate.h << 'EOF'
           #ifndef SUBSTRATE_H_
           #define SUBSTRATE_H_
           #include <mach-o/dyld.h>
           void MSHookFunction(void *symbol, void *replace, void **result);
           void *MSFindSymbol(void *image, const char *name);
           #endif
-          HEADER
-          
-          # Build stub libsubstrate for linking
-          cat > /tmp/substrate_stub.c << 'STUB'
+          EOF
+
+          # Create stub implementation (only used at link time;
+          # at runtime the real Cydia Substrate is loaded on the jailbroken device)
+          cat > /tmp/substrate/stub.c << 'EOF'
           void MSHookFunction(void *symbol, void *replace, void **result) {}
           void *MSFindSymbol(void *image, const char *name) { return (void*)0; }
-          STUB
-          
-          xcrun -sdk iphoneos clang -arch arm64 \
+          EOF
+
+          # Cross-compile stub for iOS arm64
+          xcrun -sdk iphoneos clang \
+            -arch arm64 \
             -miphoneos-version-min=15.0 \
-            -dynamiclib -o /tmp/libsubstrate.dylib \
-            /tmp/substrate_stub.c
-          
-          # Build the tweak
-          xcrun -sdk iphoneos clang -arch arm64 \
-            -isysroot "$SDK_PATH" \
+            -dynamiclib \
+            -o /tmp/substrate/libsubstrate.dylib \
+            /tmp/substrate/stub.c
+
+          file /tmp/substrate/libsubstrate.dylib
+          echo "Stub substrate built OK"
+
+      - name: Build dylib
+        run: |
+          # Cross-compile tweak for iOS arm64
+          xcrun -sdk iphoneos clang \
+            -arch arm64 \
             -miphoneos-version-min=15.0 \
             -fobjc-arc \
             -Wno-deprecated-declarations \
             -dynamiclib \
             -framework Foundation \
-            -I/tmp/sdk_include \
-            -L/tmp -lsubstrate \
+            -I/tmp/substrate \
+            -L/tmp/substrate \
+            -lsubstrate \
+            -install_name /usr/lib/JYJH_NoCDNoEnergy.dylib \
             -o JYJH_NoCDNoEnergy.dylib \
             JYJH_NoCDNoEnergy.xm
-          
-          echo "Fallback build completed"
+
+          echo "=== Build result ==="
           file JYJH_NoCDNoEnergy.dylib
+          otool -lh JYJH_NoCDNoEnergy.dylib | grep -E "BUILD_VERSION|VERSION_MIN|platform"
+          nm -g JYJH_NoCDNoEnergy.dylib | grep -i "MSHook\|hook_"
 
       - name: Sign and package
         run: |
-          # Find the dylib (Theos puts it in .theos/_/)
-          DYLIB=$(find . -name "JYJH_NoCDNoEnergy.dylib" -not -path "./.git/*" | head -1)
-          
-          if [ -z "$DYLIB" ]; then
-            echo "ERROR: dylib not found!"
-            find . -name "*.dylib" -not -path "./.git/*"
-            exit 1
-          fi
-          
-          echo "Found dylib: $DYLIB"
-          file "$DYLIB"
-          
-          # Prepare output
-          mkdir -p output
-          cp "$DYLIB" output/JYJH_NoCDNoEnergy.dylib
-          
-          # Create plist
-          cat > output/JYJH_NoCDNoEnergy.plist << 'PLIST'
+          # Pseudo-sign with ldid (for jailbroken iOS)
+          brew install ldid
+          ldid -S JYJH_NoCDNoEnergy.dylib
+
+          # Create plist filter
+          cat > JYJH_NoCDNoEnergy.plist << 'EOF'
           { Filter = { Bundles = ( "com.jyjh.whwb" ); }; }
-          PLIST
-          
-          # Sign with ldid (pseudo-sign for jailbroken devices)
-          ldid -S output/JYJH_NoCDNoEnergy.dylib
-          
-          # Verify
-          echo "=== Output ==="
+          EOF
+
+          mkdir -p output
+          cp JYJH_NoCDNoEnergy.dylib output/
+          cp JYJH_NoCDNoEnergy.plist output/
+
+          echo "=== Final output ==="
           ls -lh output/
           file output/JYJH_NoCDNoEnergy.dylib
-          otool -lh output/JYJH_NoCDNoEnergy.dylib | head -30
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -181,18 +106,18 @@ jobs:
           files: output/*
           body: |
             ## 剑影江湖 v1.8.1 无CD无能量技能插件
-            
+
             ### 功能
             - ✅ 无CD: 所有技能无冷却，连续释放
             - ✅ 无能量: 大招无需怒气/能量
-            
+
             ### 部署 (iOS无根越狱)
             ```bash
             scp JYJH_NoCDNoEnergy.dylib root@设备IP:/var/jb/usr/lib/TweakInject/
             scp JYJH_NoCDNoEnergy.plist root@设备IP:/var/jb/usr/lib/TweakInject/
             # 重启游戏
             ```
-            
+
             ### 适配
             | 项目 | 值 |
             |------|-----|
@@ -200,7 +125,7 @@ jobs:
             | 系统 | iOS 15.6 |
             | 越狱 | 无根越狱 (Dopamine/Palera1n) |
             | 游戏版本 | 1.8.1 |
-            
+
             ⚠️ 仅适用于 v1.8.1，游戏更新后偏移地址需重新确认
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
