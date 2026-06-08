@@ -1,14 +1,14 @@
 /**
- * 剑影江湖 v1.10.1 - v6.1
- * 修复基址查找 + 更安全的补丁策略
+ * 剑影江湖 v1.10.1 - v7.0
+ * 使用IL2CPP运行时API查找方法地址
  */
-
 #import <mach-o/dyld.h>
 #import <mach/mach.h>
 #import <dispatch/dispatch.h>
 #import <UIKit/UIKit.h>
 #import <stdio.h>
 #import <string.h>
+#import <dlfcn.h>
 
 extern void sys_icache_invalidate(void *start, size_t len);
 
@@ -31,16 +31,12 @@ static void jlog(NSString *fmt, ...) {
     if (g_logFile) { fprintf(g_logFile, "%s\n", [msg UTF8String]); fflush(g_logFile); }
 }
 
-static const uint64_t OFF_CheckSkillAttackCanUse = 0x30741B8;
-static const uint64_t OFF_CheckSkillIsReady       = 0x3074B54;
-static const uint64_t OFF_get_limitDamage         = 0x30A2F70;
-static const uint32_t ARM64_MOV_W0_1 = 0x52800020;
-static const uint32_t ARM64_RET      = 0xD65F03C0;
-
-static uint64_t g_base = 0;
 static BOOL g_noCD = YES;
 static BOOL g_noEnergy = YES;
 static int g_damageLimit = 10000;
+static void *g_ptrCanUse = NULL;
+static void *g_ptrIsReady = NULL;
+static void *g_ptrLimitDmg = NULL;
 static uint32_t g_orig1[2] = {0};
 static uint32_t g_orig2[2] = {0};
 
@@ -52,6 +48,7 @@ static UILabel *g_sliderLabel = nil;
 static BOOL g_panelOpen = NO;
 
 static kern_return_t patchMem(void *addr, const void *data, size_t sz) {
+    if (!addr) return KERN_INVALID_ADDRESS;
     vm_address_t pg = (vm_address_t)addr & ~(vm_page_size - 1);
     kern_return_t kr = vm_protect(mach_task_self(), pg, vm_page_size * 2, 0, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
     if (kr != KERN_SUCCESS) kr = vm_protect(mach_task_self(), pg, vm_page_size, 0, VM_PROT_ALL);
@@ -62,86 +59,118 @@ static kern_return_t patchMem(void *addr, const void *data, size_t sz) {
     return KERN_SUCCESS;
 }
 
-static uint64_t findBase(void) {
-    uint32_t cnt = _dyld_image_count();
-    jlog(@"%u modules", cnt);
+/* IL2CPP运行时查找 */
+typedef void* (*il2cpp_class_from_name_t)(const char*, const char*);
+typedef void* (*il2cpp_class_get_methods_t)(void*, void**);
+typedef const char* (*il2cpp_method_get_name_t)(void*);
+typedef void* (*il2cpp_method_get_pointer_t)(void*);
+typedef void* (*il2cpp_domain_get_t)(void);
+typedef void** (*il2cpp_domain_get_assemblies_t)(void*, size_t*);
+typedef void* (*il2cpp_assembly_get_image_t)(void*);
+typedef size_t (*il2cpp_image_get_class_count_t)(void*);
+typedef void* (*il2cpp_image_get_class_t)(void*, size_t);
+
+static void findIL2CPP(void) {
+    jlog(@"=== IL2CPP Runtime Search ===");
     
-    uint64_t mainHeader = (uint64_t)_dyld_get_image_header(0);
-    jlog(@"[0] 0x%llx main", mainHeader);
+    void *h = dlopen(NULL, RTLD_LAZY);
     
-    uint32_t test[2];
-    memcpy(test, (void *)(mainHeader + OFF_CheckSkillAttackCanUse), 8);
-    jlog(@"main+off: %08x %08x", test[0], test[1]);
+    /* 列出所有il2cpp导出 */
+    il2cpp_domain_get_t domain_get = dlsym(h, "il2cpp_domain_get");
+    il2cpp_domain_get_assemblies_t get_assemblies = dlsym(h, "il2cpp_domain_get_assemblies");
+    il2cpp_assembly_get_image_t get_image = dlsym(h, "il2cpp_assembly_get_image");
+    il2cpp_image_get_class_count_t class_count = dlsym(h, "il2cpp_image_get_class_count");
+    il2cpp_image_get_class_t get_class = dlsym(h, "il2cpp_image_get_class");
+    il2cpp_class_get_methods_t get_methods = dlsym(h, "il2cpp_class_get_methods");
+    il2cpp_method_get_name_t method_name = dlsym(h, "il2cpp_method_get_name");
+    il2cpp_method_get_pointer_t method_ptr = dlsym(h, "il2cpp_runtime_method_get_pointer");
+    if (!method_ptr) method_ptr = dlsym(h, "il2cpp_method_get_pointer");
     
-    if (test[0] != 0 && test[0] != 0xFFFFFFFF) {
-        jlog(@"use main");
-        return mainHeader;
+    jlog(@"APIs: domain=%p assemblies=%p image=%p class_count=%p get_class=%p get_methods=%p method_name=%p method_ptr=%p",
+         domain_get, get_assemblies, get_image, class_count, get_class, get_methods, method_name, method_ptr);
+    
+    if (!domain_get || !get_assemblies || !get_image || !class_count || !get_class || !get_methods || !method_name || !method_ptr) {
+        jlog(@"Missing IL2CPP APIs!");
+        return;
     }
     
-    for (uint32_t i = 1; i < cnt && i < 30; i++) {
-        const char *name = _dyld_get_image_name(i);
-        uint64_t h = (uint64_t)_dyld_get_image_header(i);
-        if (name && !strstr(name, "/usr/lib/") && !strstr(name, "/System/")) {
-            jlog(@"[%u] 0x%llx %s", i, h, name);
-            memcpy(test, (void *)(h + OFF_CheckSkillAttackCanUse), 8);
-            if (test[0] != 0 && test[0] != 0xFFFFFFFF) {
-                uint32_t inst = test[0];
-                if ((inst & 0xFC000000) == 0x94000000 || (inst & 0xFFC00000) == 0x52800000 || (inst & 0xFFC00000) == 0xF9400000) {
-                    jlog(@"FOUND [%u]: %08x", i, inst);
-                    return h;
+    void *domain = domain_get();
+    jlog(@"domain=%p", domain);
+    
+    size_t assemblyCount = 0;
+    void **assemblies = get_assemblies(domain, &assemblyCount);
+    jlog(@"%zu assemblies", assemblyCount);
+    
+    /* 遍历所有assembly找FrameSync.code.dll */
+    for (size_t a = 0; a < assemblyCount; a++) {
+        void *image = get_image(assemblies[a]);
+        size_t cnt = class_count(image);
+        
+        for (size_t c = 0; c < cnt; c++) {
+            void *klass = get_class(image, c);
+            if (!klass) continue;
+            
+            void *iter = NULL;
+            void *method = NULL;
+            while ((method = get_methods(klass, &iter)) != NULL) {
+                const char *name = method_name(method);
+                if (!name) continue;
+                
+                if (strcmp(name, "CheckSkillAttackCanUse") == 0) {
+                    g_ptrCanUse = method_ptr(method);
+                    jlog(@"FOUND CheckSkillAttackCanUse: %p", g_ptrCanUse);
+                }
+                if (strcmp(name, "CheckSkillIsReady") == 0) {
+                    g_ptrIsReady = method_ptr(method);
+                    jlog(@"FOUND CheckSkillIsReady: %p", g_ptrIsReady);
+                }
+                if (strcmp(name, "get_limitDamage") == 0) {
+                    g_ptrLimitDmg = method_ptr(method);
+                    jlog(@"FOUND get_limitDamage: %p", g_ptrLimitDmg);
                 }
             }
         }
     }
-    jlog(@"fallback main");
-    return mainHeader;
+    
+    jlog(@"Result: CanUse=%p IsReady=%p LimitDmg=%p", g_ptrCanUse, g_ptrIsReady, g_ptrLimitDmg);
 }
 
 static void applyPatches(void) {
-    if (!g_base) {
-        g_base = findBase();
-        jlog(@"base=0x%llx", g_base);
-        
-        void *p1 = (void *)(g_base + OFF_CheckSkillAttackCanUse);
-        void *p2 = (void *)(g_base + OFF_CheckSkillIsReady);
-        uint32_t v1[2], v2[2];
-        memcpy(v1, p1, 8);
-        memcpy(v2, p2, 8);
-        jlog(@"CanUse: %08x %08x", v1[0], v1[1]);
-        jlog(@"IsReady: %08x %08x", v2[0], v2[1]);
-        
-        memcpy(g_orig1, p1, 8);
-        memcpy(g_orig2, p2, 8);
+    findIL2CPP();
+    
+    if (g_ptrCanUse) {
+        uint32_t v[2]; memcpy(v, g_ptrCanUse, 8);
+        jlog(@"CanUse @%p: %08x %08x", g_ptrCanUse, v[0], v[1]);
+        memcpy(g_orig1, g_ptrCanUse, 8);
+    }
+    if (g_ptrIsReady) {
+        uint32_t v[2]; memcpy(v, g_ptrIsReady, 8);
+        jlog(@"IsReady @%p: %08x %08x", g_ptrIsReady, v[0], v[1]);
+        memcpy(g_orig2, g_ptrIsReady, 8);
     }
     
-    uint32_t p[] = { ARM64_MOV_W0_1, ARM64_RET };
+    uint32_t ret_true[] = { 0x52800020, 0xD65F03C0 };
     
-    if (g_noCD) {
-        kern_return_t kr = patchMem((void*)(g_base+OFF_CheckSkillAttackCanUse), p, 8);
+    if (g_noCD && g_ptrCanUse) {
+        kern_return_t kr = patchMem(g_ptrCanUse, ret_true, 8);
         jlog(@"NoCD kr=%d", kr);
-    } else if (g_orig1[0]) {
-        patchMem((void*)(g_base+OFF_CheckSkillAttackCanUse), g_orig1, 8);
     }
-    
-    if (g_noEnergy) {
-        kern_return_t kr = patchMem((void*)(g_base+OFF_CheckSkillIsReady), p, 8);
+    if (g_noEnergy && g_ptrIsReady) {
+        kern_return_t kr = patchMem(g_ptrIsReady, ret_true, 8);
         jlog(@"NoEnergy kr=%d", kr);
-    } else if (g_orig2[0]) {
-        patchMem((void*)(g_base+OFF_CheckSkillIsReady), g_orig2, 8);
     }
 }
 
 static void patchLimitDamage(int value) {
-    if (!g_base) return;
-    void *addr = (void *)(g_base + OFF_get_limitDamage);
+    if (!g_ptrLimitDmg) return;
     uint32_t low = value & 0xFFFF;
     uint32_t high = (value >> 16) & 0xFFFF;
     uint32_t patch[3];
     patch[0] = 0x52800000 | (low << 5);
-    patch[1] = high ? (0x72A00000 | (high << 5)) : ARM64_RET;
-    patch[2] = ARM64_RET;
-    patchMem(addr, patch, high ? 12 : 8);
-    jlog(@"limitDmg->%d", value);
+    patch[1] = high ? (0x72A00000 | (high << 5)) : 0xD65F03C0;
+    patch[2] = 0xD65F03C0;
+    kern_return_t kr = patchMem(g_ptrLimitDmg, patch, high ? 12 : 8);
+    jlog(@"limitDmg->%d kr=%d", value, kr);
 }
 
 static void refreshButtons(void) {
@@ -210,7 +239,7 @@ static void setupUI(void) {
     [win addSubview:g_panel];
     
     UILabel *title=[[UILabel alloc]initWithFrame:CGRectMake(0,10,260,24)];
-    title.text=@"剑影江湖 v6.1"; title.textColor=[UIColor cyanColor];
+    title.text=@"剑影江湖 v7.0"; title.textColor=[UIColor cyanColor];
     title.font=[UIFont boldSystemFontOfSize:15]; title.textAlignment=NSTextAlignmentCenter;
     [g_panel addSubview:title];
     
@@ -245,8 +274,8 @@ static void setupUI(void) {
 __attribute__((constructor))
 static void initialize(void) {
     g_debugLines=[NSMutableArray new];
-    jlog(@"========== JYJH v6.1 ==========");
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+    jlog(@"========== JYJH v7.0 ==========");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(5.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
         applyPatches();
         patchLimitDamage(g_damageLimit);
         setupUI();
