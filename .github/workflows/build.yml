@@ -6,136 +6,97 @@ on:
   workflow_dispatch:
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Hello from GitHub Actions!"
+      
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install iOS cross-compilation toolchain
+      - name: Install toolchain
         run: |
-          # Install cctools-port (Apple cross-compiler toolchain for Linux)
-          # This provides: arm64 clang, ldid, etc for iOS compilation on Linux
-          sudo apt-get update
-          sudo apt-get install -y git cmake ninja-build python3 libssl-dev libcurl4-openssl-dev zlib1g-dev
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git cmake ninja-build python3 libssl-dev zlib1g-dev libxml2-dev uuid-dev
 
-          # Clone and build cctools-port
-          git clone https://github.com/tpoechtrager/cctools-port.git /tmp/cctools-port --depth 1
-
-          # Build the iOS arm64 toolchain
-          cd /tmp/cctools-port
-          ./usage_examples/ios_toolchain/build.sh /tmp/ios-toolchain arm64 15.0
-
-          # Verify toolchain
-          ls /tmp/ios-toolchain/bin/
-          /tmp/ios-toolchain/bin/clang --version
-          echo "Toolchain built OK"
-
-      - name: Build stub libsubstrate
+      - name: Build cctools-port
         run: |
-          # Create substrate header
-          mkdir -p /tmp/substrate
-          cat > /tmp/substrate/substrate.h << 'EOF'
+          git clone https://github.com/tpoechtrager/cctools-port.git --depth 1
+          cd cctools-port
+          ./usage_examples/ios_toolchain/build.sh /tmp/ios arm64 15.0
+          ls /tmp/ios/bin/
+
+      - name: Build stub substrate
+        run: |
+          mkdir -p /tmp/inc
+          cat > /tmp/inc/substrate.h << 'H'
           #ifndef SUBSTRATE_H_
           #define SUBSTRATE_H_
-          #include <mach-o/dyld.h>
           void MSHookFunction(void *symbol, void *replace, void **result);
           void *MSFindSymbol(void *image, const char *name);
           #endif
-          EOF
-
-          # Stub implementation - only for linking; real Substrate on device at runtime
-          cat > /tmp/substrate/stub.c << 'EOF'
+          H
+          
+          cat > /tmp/stub.c << 'S'
           void MSHookFunction(void *symbol, void *replace, void **result) {}
           void *MSFindSymbol(void *image, const char *name) { return (void*)0; }
-          EOF
+          S
+          
+          /tmp/ios/bin/clang \
+            -arch arm64 -miphoneos-version-min=15.0 \
+            -isysroot /tmp/ios/SDK/iPhoneOS15.0.sdk \
+            -dynamiclib -o /tmp/libsubstrate.dylib /tmp/stub.c
 
-          # Cross-compile stub for iOS arm64
-          /tmp/ios-toolchain/bin/clang \
-            -arch arm64 \
-            -miphoneos-version-min=15.0 \
-            -isysroot /tmp/ios-toolchain/SDK/iPhoneOS15.0.sdk \
-            -dynamiclib \
-            -o /tmp/substrate/libsubstrate.dylib \
-            /tmp/substrate/stub.c
-
-          file /tmp/substrate/libsubstrate.dylib
-          echo "Stub substrate built"
-
-      - name: Build tweak dylib
+      - name: Build tweak
         run: |
-          # Cross-compile the tweak for iOS arm64
-          /tmp/ios-toolchain/bin/clang \
+          /tmp/ios/bin/clang \
             -arch arm64 \
             -miphoneos-version-min=15.0 \
-            -isysroot /tmp/ios-toolchain/SDK/iPhoneOS15.0.sdk \
+            -isysroot /tmp/ios/SDK/iPhoneOS15.0.sdk \
             -fobjc-arc \
-            -Wno-deprecated-declarations \
             -dynamiclib \
             -framework Foundation \
-            -I/tmp/substrate \
-            -L/tmp/substrate \
-            -lsubstrate \
+            -I/tmp/inc -L/tmp -lsubstrate \
             -install_name @executable_path/JYJH_NoCDNoEnergy.dylib \
             -o JYJH_NoCDNoEnergy.dylib \
             JYJH_NoCDNoEnergy.xm
 
-          echo "=== Build result ==="
-          file JYJH_NoCDNoEnergy.dylib
-          /tmp/ios-toolchain/bin/nm JYJH_NoCDNoEnergy.dylib 2>/dev/null | grep -i "MSHook\|hook_" || echo "nm done"
-
       - name: Sign and package
         run: |
-          # ldid is included in the toolchain for pseudo-signing
-          /tmp/ios-toolchain/bin/ldid -S JYJH_NoCDNoEnergy.dylib
-
-          # Create plist filter
-          cat > JYJH_NoCDNoEnergy.plist << 'EOF'
-          { Filter = { Bundles = ( "com.jyjh.whwb" ); }; }
-          EOF
-
+          /tmp/ios/bin/ldid -S JYJH_NoCDNoEnergy.dylib
+          echo '{ Filter = { Bundles = ( "com.jyjh.whwb" ); }; }' > JYJH_NoCDNoEnergy.plist
           mkdir -p output
-          cp JYJH_NoCDNoEnergy.dylib output/
-          cp JYJH_NoCDNoEnergy.plist output/
-
-          echo "=== Final output ==="
-          ls -lh output/
+          cp JYJH_NoCDNoEnergy.dylib JYJH_NoCDNoEnergy.plist output/
           file output/JYJH_NoCDNoEnergy.dylib
+          ls -lh output/
 
-      - name: Upload artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: JYJH_NoCDNoEnergy-dylib
           path: output/
-          retention-days: 90
 
-      - name: Create release
+      - name: Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.0
           files: output/*
           body: |
             ## 剑影江湖 v1.8.1 无CD无能量技能插件
-
+            
             ### 功能
-            - ✅ 无CD: 所有技能无冷却，连续释放
+            - ✅ 无CD: 所有技能无冷却
             - ✅ 无能量: 大招无需怒气/能量
-
+            
             ### 部署 (iOS无根越狱)
             ```bash
-            scp JYJH_NoCDNoEnergy.dylib root@设备IP:/var/jb/usr/lib/TweakInject/
-            scp JYJH_NoCDNoEnergy.plist root@设备IP:/var/jb/usr/lib/TweakInject/
-            # 重启游戏
+            scp JYJH_NoCDNoEnergy.dylib root@IP:/var/jb/usr/lib/TweakInject/
+            scp JYJH_NoCDNoEnergy.plist root@IP:/var/jb/usr/lib/TweakInject/
             ```
-
-            ### 适配
-            | 项目 | 值 |
-            |------|-----|
-            | 设备 | iPhone 13 Pro Max |
-            | 系统 | iOS 15.6 |
-            | 越狱 | 无根越狱 (Dopamine/Palera1n) |
-            | 游戏版本 | 1.8.1 |
-
+            
             ⚠️ 仅适用于 v1.8.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
