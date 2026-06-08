@@ -6,28 +6,97 @@ on:
   workflow_dispatch:
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "Hello from GitHub Actions!"
-      
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install toolchain
+      - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq git cmake ninja-build python3 libssl-dev zlib1g-dev libxml2-dev uuid-dev
+          sudo apt-get install -y -qq git cmake ninja-build python3 \
+            libssl-dev zlib1g-dev libxml2-dev uuid-dev libbsd-dev \
+            autoconf automake libtool pkg-config
 
-      - name: Build cctools-port
+      - name: Build cctools-port with SDK
         run: |
-          git clone https://github.com/tpoechtrager/cctools-port.git --depth 1
-          cd cctools-port
-          ./usage_examples/ios_toolchain/build.sh /tmp/ios arm64 15.0
-          ls /tmp/ios/bin/
+          # Clone cctools-port
+          git clone https://github.com/tpoechtrager/cctools-port.git --depth 1 /tmp/cctools
+
+          # The build.sh script needs an Xcode .dmg to extract the SDK
+          # We use the iOS SDK from a separate repo that provides pre-extracted SDKs
+          # Download iOS 15.0 SDK from xybp1234/iOS-SDKs (community maintained)
+          git clone https://github.com/xybp1234/iOS-SDKs.git --depth 1 /tmp/sdks
+
+          # Find the iPhoneOS SDK
+          ls /tmp/sdks/
+          SDK_PATH=$(find /tmp/sdks -name "iPhoneOS*" -type d | head -1)
+          echo "Found SDK: $SDK_PATH"
+
+          if [ -z "$SDK_PATH" ]; then
+            echo "ERROR: No iPhoneOS SDK found!"
+            ls -R /tmp/sdks/ | head -30
+            exit 1
+          fi
+
+          # Build cctools-port toolchain manually
+          cd /tmp/cctools
+
+          # Set target
+          TARGET=arm64-apple-darwin14
+          PREFIX=/tmp/ios-toolchain
+
+          # Build ld64
+          cd ld64
+          mkdir -p build && cd build
+          cmake .. -DCMAKE_INSTALL_PREFIX=$PREFIX \
+            -DCMAKE_OSX_SYSROOT=$SDK_PATH \
+            -DTARGET_ARCH=arm64 \
+            -DLLVM_SUPPORT=OFF
+          make -j$(nproc) && make install
+          cd ../..
+
+          # Build cctools (as, ar, nm, etc)
+          cd cctools
+          mkdir -p build && cd build
+          ../configure --target=$TARGET --prefix=$PREFIX
+          make -j$(nproc) && make install
+          cd ../..
+
+          # Install SDK
+          mkdir -p $PREFIX/SDK
+          cp -r $SDK_PATH $PREFIX/SDK/
+
+          echo "Toolchain built"
+          ls $PREFIX/bin/ 2>/dev/null || echo "No bin dir"
+
+      - name: Fallback - use prebuilt toolchain
+        if: failure()
+        run: |
+          echo "CCTools build failed, trying prebuilt toolchain..."
+          
+          # Try downloading a prebuilt iOS toolchain
+          # Option 1: from theos/devcontainers
+          mkdir -p /tmp/ios-toolchain
+          
+          # Use Theos's prebuilt toolchain
+          git clone --recursive https://github.com/theos/theos.git /tmp/theos
+          ls /tmp/theos/toolchain/linux/iphone/
+          
+          if [ -d "/tmp/theos/toolchain/linux/iphone" ]; then
+            cp -r /tmp/theos/toolchain/linux/iphone/* /tmp/ios-toolchain/
+            echo "Theos toolchain copied"
+          fi
+          
+          # Get iOS SDK
+          git clone https://github.com/xybp1234/iOS-SDKs.git --depth 1 /tmp/sdks
+          SDK_PATH=$(find /tmp/sdks -name "iPhoneOS*" -type d | head -1)
+          mkdir -p /tmp/ios-toolchain/SDK
+          cp -r "$SDK_PATH" /tmp/ios-toolchain/SDK/
+          
+          ls /tmp/ios-toolchain/bin/ || echo "No bin"
+          ls /tmp/ios-toolchain/SDK/ || echo "No SDK"
 
       - name: Build stub substrate
         run: |
@@ -44,18 +113,33 @@ jobs:
           void MSHookFunction(void *symbol, void *replace, void **result) {}
           void *MSFindSymbol(void *image, const char *name) { return (void*)0; }
           S
-          
-          /tmp/ios/bin/clang \
-            -arch arm64 -miphoneos-version-min=15.0 \
-            -isysroot /tmp/ios/SDK/iPhoneOS15.0.sdk \
-            -dynamiclib -o /tmp/libsubstrate.dylib /tmp/stub.c
 
       - name: Build tweak
         run: |
-          /tmp/ios/bin/clang \
+          # Find clang in toolchain
+          CLANG=$(find /tmp/ios-toolchain -name "clang" -type f | head -1)
+          SDK=$(find /tmp/ios-toolchain -name "iPhoneOS*" -type d | head -1)
+          
+          if [ -z "$CLANG" ]; then
+            echo "ERROR: No clang found in toolchain!"
+            find /tmp/ios-toolchain -type f | head -20
+            exit 1
+          fi
+          
+          echo "Using clang: $CLANG"
+          echo "Using SDK: $SDK"
+          
+          # Build stub substrate
+          $CLANG \
+            -arch arm64 -miphoneos-version-min=15.0 \
+            -isysroot "$SDK" \
+            -dynamiclib -o /tmp/libsubstrate.dylib /tmp/stub.c
+          
+          # Build tweak
+          $CLANG \
             -arch arm64 \
             -miphoneos-version-min=15.0 \
-            -isysroot /tmp/ios/SDK/iPhoneOS15.0.sdk \
+            -isysroot "$SDK" \
             -fobjc-arc \
             -dynamiclib \
             -framework Foundation \
@@ -66,7 +150,13 @@ jobs:
 
       - name: Sign and package
         run: |
-          /tmp/ios/bin/ldid -S JYJH_NoCDNoEnergy.dylib
+          LDID=$(find /tmp -name "ldid" -type f | head -1)
+          if [ -n "$LDID" ]; then
+            $LDID -S JYJH_NoCDNoEnergy.dylib
+          else
+            echo "ldid not found, skipping pseudo-sign"
+          fi
+          
           echo '{ Filter = { Bundles = ( "com.jyjh.whwb" ); }; }' > JYJH_NoCDNoEnergy.plist
           mkdir -p output
           cp JYJH_NoCDNoEnergy.dylib JYJH_NoCDNoEnergy.plist output/
@@ -86,17 +176,8 @@ jobs:
           files: output/*
           body: |
             ## 剑影江湖 v1.8.1 无CD无能量技能插件
-            
-            ### 功能
-            - ✅ 无CD: 所有技能无冷却
-            - ✅ 无能量: 大招无需怒气/能量
-            
-            ### 部署 (iOS无根越狱)
-            ```bash
-            scp JYJH_NoCDNoEnergy.dylib root@IP:/var/jb/usr/lib/TweakInject/
-            scp JYJH_NoCDNoEnergy.plist root@IP:/var/jb/usr/lib/TweakInject/
-            ```
-            
+            - ✅ 无CD + 无能量
+            - 适配 iPhone 13 Pro Max / iOS 15.6 / 无根越狱
             ⚠️ 仅适用于 v1.8.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
