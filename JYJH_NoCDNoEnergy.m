@@ -1,10 +1,6 @@
 /**
- * 剑影江湖 v1.10.1 - v6.0
- * 新策略：多函数补丁
- * 1. CheckSkillAttackCanUse -> return true (技能可用检查)
- * 2. UpdateSkillCoolDown -> 空函数 (不更新CD倒计时)
- * 3. ReduceSkillCd -> 空函数 (可选，CD减少也跳过)
- * 4. get_limitDamage -> return 自定义值
+ * 剑影江湖 v1.10.1 - v6.1
+ * 修复基址查找 + 更安全的补丁策略
  */
 
 #import <mach-o/dyld.h>
@@ -20,7 +16,6 @@ static FILE *g_logFile = NULL;
 static NSMutableArray *g_debugLines = nil;
 static UILabel *g_debugLabel = nil;
 
-static void jlog(NSString *fmt, ...) NS_FORMAT_FUNCTION(1,2);
 static void jlog(NSString *fmt, ...) {
     va_list args;
     va_start(args, fmt);
@@ -32,19 +27,13 @@ static void jlog(NSString *fmt, ...) {
     if (!g_logFile) {
         NSString *p = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/jyjh.log"];
         g_logFile = fopen([p UTF8String], "a");
-        if (!g_logFile) g_logFile = fopen("/tmp/jyjh.log", "a");
     }
     if (g_logFile) { fprintf(g_logFile, "%s\n", [msg UTF8String]); fflush(g_logFile); }
 }
 
-/* v1.10.1 偏移 */
 static const uint64_t OFF_CheckSkillAttackCanUse = 0x30741B8;
 static const uint64_t OFF_CheckSkillIsReady       = 0x3074B54;
-static const uint64_t OFF_UpdateSkillCoolDown     = 0x30C7FA8;
-static const uint64_t OFF_ReduceSkillCd           = 0x3073288;
 static const uint64_t OFF_get_limitDamage         = 0x30A2F70;
-static const uint64_t OFF_PlayerUseSkill          = 0x309681C;
-
 static const uint32_t ARM64_MOV_W0_1 = 0x52800020;
 static const uint32_t ARM64_RET      = 0xD65F03C0;
 
@@ -52,13 +41,8 @@ static uint64_t g_base = 0;
 static BOOL g_noCD = YES;
 static BOOL g_noEnergy = YES;
 static int g_damageLimit = 10000;
-
-/* 保存原始指令 */
-static uint32_t g_origCheckCanUse[2] = {0};
-static uint32_t g_origCheckIsReady[2] = {0};
-static uint32_t g_origUpdateCD[4] = {0};
-static uint32_t g_origReduceCD[4] = {0};
-static uint32_t g_origLimitDmg[8] = {0};
+static uint32_t g_orig1[2] = {0};
+static uint32_t g_orig2[2] = {0};
 
 static UIView *g_panel = nil;
 static UIButton *g_btnCD = nil;
@@ -67,13 +51,10 @@ static UISlider *g_slider = nil;
 static UILabel *g_sliderLabel = nil;
 static BOOL g_panelOpen = NO;
 
-/* ====== 内存补丁 ====== */
 static kern_return_t patchMem(void *addr, const void *data, size_t sz) {
     vm_address_t pg = (vm_address_t)addr & ~(vm_page_size - 1);
-    kern_return_t kr = vm_protect(mach_task_self(), pg, vm_page_size * 2, 0,
-                                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-    if (kr != KERN_SUCCESS)
-        kr = vm_protect(mach_task_self(), pg, vm_page_size, 0, VM_PROT_ALL);
+    kern_return_t kr = vm_protect(mach_task_self(), pg, vm_page_size * 2, 0, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (kr != KERN_SUCCESS) kr = vm_protect(mach_task_self(), pg, vm_page_size, 0, VM_PROT_ALL);
     if (kr != KERN_SUCCESS) return kr;
     memcpy(addr, data, sz);
     sys_icache_invalidate(addr, sz);
@@ -84,23 +65,36 @@ static kern_return_t patchMem(void *addr, const void *data, size_t sz) {
 static uint64_t findBase(void) {
     uint32_t cnt = _dyld_image_count();
     jlog(@"%u modules", cnt);
-    for (uint32_t i = 0; i < cnt && i < 60; i++) {
+    
+    uint64_t mainHeader = (uint64_t)_dyld_get_image_header(0);
+    jlog(@"[0] 0x%llx main", mainHeader);
+    
+    uint32_t test[2];
+    memcpy(test, (void *)(mainHeader + OFF_CheckSkillAttackCanUse), 8);
+    jlog(@"main+off: %08x %08x", test[0], test[1]);
+    
+    if (test[0] != 0 && test[0] != 0xFFFFFFFF) {
+        jlog(@"use main");
+        return mainHeader;
+    }
+    
+    for (uint32_t i = 1; i < cnt && i < 30; i++) {
         const char *name = _dyld_get_image_name(i);
+        uint64_t h = (uint64_t)_dyld_get_image_header(i);
         if (name && !strstr(name, "/usr/lib/") && !strstr(name, "/System/")) {
-            uint64_t h = (uint64_t)_dyld_get_image_header(i);
             jlog(@"[%u] 0x%llx %s", i, h, name);
+            memcpy(test, (void *)(h + OFF_CheckSkillAttackCanUse), 8);
+            if (test[0] != 0 && test[0] != 0xFFFFFFFF) {
+                uint32_t inst = test[0];
+                if ((inst & 0xFC000000) == 0x94000000 || (inst & 0xFFC00000) == 0x52800000 || (inst & 0xFFC00000) == 0xF9400000) {
+                    jlog(@"FOUND [%u]: %08x", i, inst);
+                    return h;
+                }
+            }
         }
     }
-    return (uint64_t)_dyld_get_image_header(0);
-}
-
-static void readBytes(const char *name, uint64_t addr, uint32_t *buf, int count) {
-    void *p = (void *)(g_base + addr);
-    memcpy(buf, p, count * 4);
-    NSString *hex = [NSString stringWithFormat:@"%@ @0x%llx:", name, (uint64_t)p];
-    for (int i = 0; i < count && i < 4; i++)
-        hex = [hex stringByAppendingFormat:@" %08x", buf[i]];
-    jlog(@"%@", hex);
+    jlog(@"fallback main");
+    return mainHeader;
 }
 
 static void applyPatches(void) {
@@ -108,40 +102,32 @@ static void applyPatches(void) {
         g_base = findBase();
         jlog(@"base=0x%llx", g_base);
         
-        /* 读取所有目标函数的原始字节 */
-        readBytes("CanUse", OFF_CheckSkillAttackCanUse, g_origCheckCanUse, 2);
-        readBytes("IsReady", OFF_CheckSkillIsReady, g_origCheckIsReady, 2);
-        readBytes("UpdateCD", OFF_UpdateSkillCoolDown, g_origUpdateCD, 4);
-        readBytes("ReduceCD", OFF_ReduceSkillCd, g_origReduceCD, 4);
-        readBytes("LimitDmg", OFF_get_limitDamage, g_origLimitDmg, 4);
+        void *p1 = (void *)(g_base + OFF_CheckSkillAttackCanUse);
+        void *p2 = (void *)(g_base + OFF_CheckSkillIsReady);
+        uint32_t v1[2], v2[2];
+        memcpy(v1, p1, 8);
+        memcpy(v2, p2, 8);
+        jlog(@"CanUse: %08x %08x", v1[0], v1[1]);
+        jlog(@"IsReady: %08x %08x", v2[0], v2[1]);
+        
+        memcpy(g_orig1, p1, 8);
+        memcpy(g_orig2, p2, 8);
     }
     
-    uint32_t ret_true[] = { ARM64_MOV_W0_1, ARM64_RET };  /* return true */
-    uint32_t ret_void[] = { ARM64_RET };                     /* return (void) */
+    uint32_t p[] = { ARM64_MOV_W0_1, ARM64_RET };
     
     if (g_noCD) {
-        /* CheckSkillAttackCanUse -> return true */
-        kern_return_t kr1 = patchMem((void*)(g_base+OFF_CheckSkillAttackCanUse), ret_true, 8);
-        /* UpdateSkillCoolDown -> return (不更新CD) */
-        kern_return_t kr2 = patchMem((void*)(g_base+OFF_UpdateSkillCoolDown), ret_void, 4);
-        /* ReduceSkillCd -> return (可选) */
-        kern_return_t kr3 = patchMem((void*)(g_base+OFF_ReduceSkillCd), ret_void, 4);
-        jlog(@"NoCD: CanUse kr=%d UpdateCD kr=%d ReduceCD kr=%d", kr1, kr2, kr3);
-    } else {
-        /* 恢复原始 */
-        if (g_origCheckCanUse[0]) patchMem((void*)(g_base+OFF_CheckSkillAttackCanUse), g_origCheckCanUse, 8);
-        if (g_origUpdateCD[0]) patchMem((void*)(g_base+OFF_UpdateSkillCoolDown), g_origUpdateCD, 16);
-        if (g_origReduceCD[0]) patchMem((void*)(g_base+OFF_ReduceSkillCd), g_origReduceCD, 16);
-        jlog(@"NoCD: restored");
+        kern_return_t kr = patchMem((void*)(g_base+OFF_CheckSkillAttackCanUse), p, 8);
+        jlog(@"NoCD kr=%d", kr);
+    } else if (g_orig1[0]) {
+        patchMem((void*)(g_base+OFF_CheckSkillAttackCanUse), g_orig1, 8);
     }
     
     if (g_noEnergy) {
-        /* CheckSkillIsReady -> return true (如果原始不是已经return true) */
-        kern_return_t kr = patchMem((void*)(g_base+OFF_CheckSkillIsReady), ret_true, 8);
-        jlog(@"NoEnergy: IsReady kr=%d", kr);
-    } else {
-        if (g_origCheckIsReady[0]) patchMem((void*)(g_base+OFF_CheckSkillIsReady), g_origCheckIsReady, 8);
-        jlog(@"NoEnergy: restored");
+        kern_return_t kr = patchMem((void*)(g_base+OFF_CheckSkillIsReady), p, 8);
+        jlog(@"NoEnergy kr=%d", kr);
+    } else if (g_orig2[0]) {
+        patchMem((void*)(g_base+OFF_CheckSkillIsReady), g_orig2, 8);
     }
 }
 
@@ -154,11 +140,10 @@ static void patchLimitDamage(int value) {
     patch[0] = 0x52800000 | (low << 5);
     patch[1] = high ? (0x72A00000 | (high << 5)) : ARM64_RET;
     patch[2] = ARM64_RET;
-    kern_return_t kr = patchMem(addr, patch, high ? 12 : 8);
-    jlog(@"limitDmg->%d: %s", value, kr==KERN_SUCCESS?"OK":"FAIL");
+    patchMem(addr, patch, high ? 12 : 8);
+    jlog(@"limitDmg->%d", value);
 }
 
-/* ====== UI ====== */
 static void refreshButtons(void) {
     [g_btnCD setTitle: g_noCD ? @"✅ 无CD: 开" : @"❌ 无CD: 关" forState:UIControlStateNormal];
     g_btnCD.backgroundColor = g_noCD ? [UIColor colorWithRed:0.15 green:0.75 blue:0.15 alpha:0.95] : [UIColor colorWithRed:0.7 green:0.15 blue:0.15 alpha:0.95];
@@ -212,10 +197,8 @@ static void togglePanel(UIView *bv) {
 
 static void setupUI(void) {
     UIWindow *win = nil;
-    for (UIWindow *w in [UIApplication sharedApplication].windows)
-        if (w.isKeyWindow && !w.isHidden) { win = w; break; }
-    if (!win) for (UIWindow *w in [UIApplication sharedApplication].windows)
-        if (!w.isHidden) { win = w; break; }
+    for (UIWindow *w in [UIApplication sharedApplication].windows) if (w.isKeyWindow && !w.isHidden) { win = w; break; }
+    if (!win) for (UIWindow *w in [UIApplication sharedApplication].windows) if (!w.isHidden) { win = w; break; }
     if (!win) { dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{setupUI();}); return; }
     
     JYJHBallView *ball = [[JYJHBallView alloc] init];
@@ -227,7 +210,7 @@ static void setupUI(void) {
     [win addSubview:g_panel];
     
     UILabel *title=[[UILabel alloc]initWithFrame:CGRectMake(0,10,260,24)];
-    title.text=@"剑影江湖 v6.0"; title.textColor=[UIColor cyanColor];
+    title.text=@"剑影江湖 v6.1"; title.textColor=[UIColor cyanColor];
     title.font=[UIFont boldSystemFontOfSize:15]; title.textAlignment=NSTextAlignmentCenter;
     [g_panel addSubview:title];
     
@@ -253,7 +236,7 @@ static void setupUI(void) {
     g_debugLabel=[[UILabel alloc]initWithFrame:CGRectMake(8,186,244,204)];
     g_debugLabel.textColor=[UIColor colorWithRed:0.2 green:1.0 blue:0.2 alpha:1.0];
     g_debugLabel.font=[UIFont fontWithName:@"Menlo" size:10];
-    g_debugLabel.numberOfLines=0; g_debugLabel.lineBreakMode=NSLineBreakByCharWrapping;
+    g_debugLabel.numberOfLines=0;
     [g_panel addSubview:g_debugLabel];
     
     refreshButtons();
@@ -262,7 +245,7 @@ static void setupUI(void) {
 __attribute__((constructor))
 static void initialize(void) {
     g_debugLines=[NSMutableArray new];
-    jlog(@"========== JYJH v6.0 ==========");
+    jlog(@"========== JYJH v6.1 ==========");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
         applyPatches();
         patchLimitDamage(g_damageLimit);
