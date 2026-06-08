@@ -1,5 +1,5 @@
 /**
- * 剑影江湖 v1.10.1 - v7.3
+ * 剑影江湖 v1.10.1 - v7.4
  * 不覆盖原函数，修改MethodInfo->methodPointer指向我们分配的代码
  * v7.2闪退原因：覆盖原函数STP指令，callee-saved寄存器未保存
  */
@@ -10,7 +10,7 @@
 #import <stdio.h>
 #import <string.h>
 #import <dlfcn.h>
-#import <sys/mman.h>
+
 
 extern void sys_icache_invalidate(void *start, size_t len);
 
@@ -90,7 +90,7 @@ static void* getMethodPointer(void *methodInfo) {
 }
 
 static void findIL2CPP(void) {
-    jlog(@"=== v7.3 ===");
+    jlog(@"=== v7.4 ===");
     void *h = dlopen(NULL, RTLD_LAZY);
     Il2CppDomainGet domain_get = dlsym(h, "il2cpp_domain_get");
     Il2CppDomainGetAssemblies get_assemblies = dlsym(h, "il2cpp_domain_get_assemblies");
@@ -152,14 +152,14 @@ static int writeReturnValue(void *addr, int value) {
 static void applyPatches(void) {
     if (!g_infoCanUse) findIL2CPP();
     if (!g_codeMem) {
-        g_codeMem = mmap(NULL, 4096, PROT_READ|PROT_WRITE|PROT_EXEC, MAP_PRIVATE|MAP_ANONYMOUS|MAP_JIT, -1, 0);
-        if (g_codeMem == MAP_FAILED) { jlog(@"mmap fail"); g_codeMem = NULL; return; }
+        vm_address_t addr = 0; kern_return_t kr = vm_allocate(mach_task_self(), &addr, vm_page_size, VM_FLAGS_ANYWHERE); g_codeMem = (kr == KERN_SUCCESS) ? (void*)addr : NULL;
+        if (!g_codeMem) { jlog(@"vm_alloc fail"); return; }
         jlog(@"codeMem=%p", g_codeMem);
     }
     void *c1 = g_codeMem;
-    writeReturnTrue(c1);
+    writeReturnTrue(c1); { vm_address_t pg = (vm_address_t)c1 & ~(vm_page_size-1); sys_icache_invalidate(c1, 56); vm_protect(mach_task_self(), pg, vm_page_size, 0, VM_PROT_READ | VM_PROT_EXECUTE); }
     void *c2 = (char*)g_codeMem + 64;
-    writeReturnTrue(c2);
+    writeReturnTrue(c2); { vm_address_t pg = (vm_address_t)c2 & ~(vm_page_size-1); sys_icache_invalidate(c2, 56); vm_protect(mach_task_self(), pg, vm_page_size, 0, VM_PROT_READ | VM_PROT_EXECUTE); }
     g_codeLimitDmg = (char*)g_codeMem + 128;
     if (g_noCD && g_infoCanUse) {
         kern_return_t kr = patchMem(g_infoCanUse, &c1, sizeof(void*));
@@ -173,7 +173,7 @@ static void applyPatches(void) {
 
 static void patchLimitDamage(int value) {
     if (!g_infoLimitDmg || !g_codeMem) return;
-    writeReturnValue(g_codeLimitDmg, value);
+    { vm_address_t pg = (vm_address_t)g_codeLimitDmg & ~(vm_page_size-1); vm_protect(mach_task_self(), pg, vm_page_size, 0, VM_PROT_READ | VM_PROT_WRITE); writeReturnValue(g_codeLimitDmg, value); sys_icache_invalidate(g_codeLimitDmg, 64); vm_protect(mach_task_self(), pg, vm_page_size, 0, VM_PROT_READ | VM_PROT_EXECUTE); }
     kern_return_t kr = patchMem(g_infoLimitDmg, &g_codeLimitDmg, sizeof(void*));
     jlog(@"LimitDmg->%p val=%d kr=%d", g_codeLimitDmg, value, kr);
 }
@@ -239,7 +239,7 @@ static void setupUI(void) {
     g_panel.backgroundColor=[UIColor colorWithRed:0.08 green:0.08 blue:0.12 alpha:0.98];
     g_panel.layer.cornerRadius=14; g_panel.hidden=YES; [win addSubview:g_panel];
     UILabel *title=[[UILabel alloc]initWithFrame:CGRectMake(0,10,260,24)];
-    title.text=@"\u5251\u5f71\u6c5f\u6e56 v7.3"; title.textColor=[UIColor cyanColor];
+    title.text=@"\u5251\u5f71\u6c5f\u6e56 v7.4"; title.textColor=[UIColor cyanColor];
     title.font=[UIFont boldSystemFontOfSize:15]; title.textAlignment=NSTextAlignmentCenter; [g_panel addSubview:title];
     g_btnCD=[UIButton buttonWithType:UIButtonTypeCustom]; g_btnCD.frame=CGRectMake(16,42,228,36);
     g_btnCD.layer.cornerRadius=8; [g_btnCD addTarget:[JYJHActionHandler shared] action:@selector(onCD) forControlEvents:UIControlEventTouchUpInside]; [g_panel addSubview:g_btnCD];
@@ -260,7 +260,7 @@ static void setupUI(void) {
 __attribute__((constructor))
 static void initialize(void) {
     g_debugLines=[NSMutableArray new];
-    jlog(@"========== JYJH v7.3 ==========");
+    jlog(@"========== JYJH v7.4 ==========");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(5.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
         applyPatches();
         patchLimitDamage(g_damageLimit);
