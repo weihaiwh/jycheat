@@ -1,6 +1,6 @@
 /**
  * 剑影江湖 (com.jyjh.whwb) v1.10.1 - 无CD无能量技能插件
- * v3.2: 修复悬浮菜单
+ * v3.3: 修复触摸穿透 - 不阻挡游戏操作
  */
 
 #import <mach-o/dyld.h>
@@ -13,10 +13,8 @@ extern void sys_icache_invalidate(void *start, size_t len);
 
 #define LOG(fmt, args...) NSLog(@"[JYJH] " fmt, ##args)
 
-/* 偏移 (v1.10.1) */
 static const uint64_t OFF_CheckSkillAttackCanUse = 0x30741B8;
 static const uint64_t OFF_CheckSkillIsReady       = 0x3074B54;
-
 static const uint32_t ARM64_MOV_W0_1 = 0x52800020;
 static const uint32_t ARM64_RET      = 0xD65F03C0;
 
@@ -26,8 +24,6 @@ static BOOL g_noEnergy = YES;
 static uint32_t g_orig1[2] = {0, 0};
 static uint32_t g_orig2[2] = {0, 0};
 
-/* UI 全局 */
-static UIView *g_rootView = nil;
 static UIButton *g_ball = nil;
 static UIView *g_panel = nil;
 static UIButton *g_btnCD = nil;
@@ -70,7 +66,7 @@ static void doPatch(void) {
     else if (g_orig2[0]) patchMem((void *)(g_base + OFF_CheckSkillIsReady), g_orig2, 8);
 }
 
-/* ====== UI 辅助函数 ====== */
+/* ====== UI辅助 ====== */
 static void refreshButtons(void) {
     [g_btnCD setTitle: g_noCD ? @"✅ 无CD: 开" : @"❌ 无CD: 关" forState:UIControlStateNormal];
     g_btnCD.backgroundColor = g_noCD ?
@@ -95,14 +91,29 @@ static void layoutPanel(void) {
     g_panel.frame = CGRectMake(px, py, pw, ph);
 }
 
-/* ====== ObjC Target ====== */
+/* ====== 触摸穿透View ====== */
+@interface JYJHPassView : UIView
+@end
 
+@implementation JYJHPassView
+
+/* 关键：只拦截悬浮球和面板区域的触摸，其余穿透 */
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    /* 如果点击的是悬浮球或面板内的子view，返回它 */
+    if (hit != self) return hit;
+    /* 点击空白区域 → 穿透给游戏 */
+    return nil;
+}
+
+@end
+
+/* ====== 事件处理 ====== */
 @interface JYJHHandler : NSObject
 - (void)tapBall;
 - (void)tapCD;
 - (void)tapEnergy;
 - (void)drag:(UIPanGestureRecognizer *)pan;
-- (void)tapBg:(UITapGestureRecognizer *)tap;
 @end
 
 @implementation JYJHHandler
@@ -126,32 +137,21 @@ static void layoutPanel(void) {
 }
 
 - (void)drag:(UIPanGestureRecognizer *)pan {
-    CGPoint t = [pan translationInView:g_rootView];
+    CGPoint t = [pan translationInView:g_ball.superview];
     CGRect f = g_ball.frame;
     CGRect sc = [UIScreen mainScreen].bounds;
     f.origin.x = MAX(0, MIN(sc.size.width - f.size.width, f.origin.x + t.x));
     f.origin.y = MAX(50, MIN(sc.size.height - f.size.height - 50, f.origin.y + t.y));
     g_ball.frame = f;
-    [pan setTranslation:CGPointZero inView:g_rootView];
+    [pan setTranslation:CGPointZero inView:g_ball.superview];
     if (g_open) layoutPanel();
-}
-
-- (void)tapBg:(UITapGestureRecognizer *)tap {
-    if (!g_open) return;
-    CGPoint p = [tap locationInView:g_rootView];
-    if (!CGRectContainsPoint(g_ball.frame, p) && !CGRectContainsPoint(g_panel.frame, p)) {
-        g_open = NO;
-        g_panel.hidden = YES;
-    }
 }
 
 @end
 
-static JYJHHandler *g_handler = nil;
-
 /* ====== 创建菜单 ====== */
 static void setupMenu(void) {
-    if (g_rootView) return;
+    if (g_ball) return;
     
     UIWindow *win = nil;
     for (UIWindow *w in [UIApplication sharedApplication].windows) {
@@ -167,35 +167,33 @@ static void setupMenu(void) {
         return;
     }
     
-    g_handler = [[JYJHHandler alloc] init];
-    
+    JYJHHandler *h = [[JYJHHandler alloc] init];
     CGRect sc = [UIScreen mainScreen].bounds;
     
-    /* 全屏透明容器 */
-    g_rootView = [[UIView alloc] initWithFrame:sc];
-    g_rootView.backgroundColor = [UIColor clearColor];
-    g_rootView.userInteractionEnabled = YES;
-    [win addSubview:g_rootView];
+    /* 全屏穿透容器 - hitTest返回nil让触摸穿透 */
+    JYJHPassView *container = [[JYJHPassView alloc] initWithFrame:sc];
+    container.backgroundColor = [UIColor clearColor];
+    [win addSubview:container];
     
-    /* 悬浮球 */
+    /* 悬浮球 - 加到穿透容器里，hitTest会返回它 */
     g_ball = [UIButton buttonWithType:UIButtonTypeCustom];
     g_ball.frame = CGRectMake(sc.size.width - 54, 200, 44, 44);
     g_ball.backgroundColor = [UIColor colorWithRed:0.1 green:0.5 blue:0.95 alpha:0.9];
     g_ball.layer.cornerRadius = 22;
     [g_ball setTitle:@"剑" forState:UIControlStateNormal];
     g_ball.titleLabel.font = [UIFont boldSystemFontOfSize:18];
-    [g_ball addTarget:g_handler action:@selector(tapBall) forControlEvents:UIControlEventTouchUpInside];
-    [g_rootView addSubview:g_ball];
+    [g_ball addTarget:h action:@selector(tapBall) forControlEvents:UIControlEventTouchUpInside];
+    [container addSubview:g_ball];
     
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:g_handler action:@selector(drag:)];
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:h action:@selector(drag:)];
     [g_ball addGestureRecognizer:pan];
     
-    /* 菜单面板 - 加到window上避免被裁剪 */
+    /* 面板 - 也加到穿透容器，hitTest会返回面板内的按钮 */
     g_panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 180, 150)];
     g_panel.backgroundColor = [UIColor colorWithRed:0.12 green:0.12 blue:0.18 alpha:0.97];
     g_panel.layer.cornerRadius = 14;
     g_panel.hidden = YES;
-    [win addSubview:g_panel];
+    [container addSubview:g_panel];
     
     UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0, 10, 180, 22)];
     title.text = @"剑影江湖 v1.10.1";
@@ -207,27 +205,21 @@ static void setupMenu(void) {
     g_btnCD = [UIButton buttonWithType:UIButtonTypeCustom];
     g_btnCD.frame = CGRectMake(12, 42, 156, 40);
     g_btnCD.layer.cornerRadius = 10;
-    [g_btnCD addTarget:g_handler action:@selector(tapCD) forControlEvents:UIControlEventTouchUpInside];
+    [g_btnCD addTarget:h action:@selector(tapCD) forControlEvents:UIControlEventTouchUpInside];
     [g_panel addSubview:g_btnCD];
     
     g_btnEnergy = [UIButton buttonWithType:UIButtonTypeCustom];
     g_btnEnergy.frame = CGRectMake(12, 92, 156, 40);
     g_btnEnergy.layer.cornerRadius = 10;
-    [g_btnEnergy addTarget:g_handler action:@selector(tapEnergy) forControlEvents:UIControlEventTouchUpInside];
+    [g_btnEnergy addTarget:h action:@selector(tapEnergy) forControlEvents:UIControlEventTouchUpInside];
     [g_panel addSubview:g_btnEnergy];
     
     refreshButtons();
-    
-    /* 点击背景关闭 */
-    UITapGestureRecognizer *bgTap = [[UITapGestureRecognizer alloc] initWithTarget:g_handler action:@selector(tapBg:)];
-    bgTap.cancelsTouchesInView = NO;
-    [g_rootView addGestureRecognizer:bgTap];
 }
 
-/* ====== 入口 ====== */
 __attribute__((constructor))
 static void initialize(void) {
-    LOG(@"JYJH v3.2 loaded");
+    LOG(@"JYJH v3.3 loaded");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         doPatch();
