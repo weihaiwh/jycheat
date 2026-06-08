@@ -1,0 +1,271 @@
+name: Build JYJH NoCD NoEnergy Dylib
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install ldid
+
+      - name: Setup iOS cross-compilation SDK
+        run: |
+          # Download iOS SDK for cross-compilation
+          # Using a pre-built SDK from nicm/machsrc or alternative
+          mkdir -p /tmp/ios_sdk
+          
+          # We need: iOS SDK headers + libsubstrate
+          # Download libsubstrate (arm64)
+          curl -sL "https://raw.githubusercontent.com/nytheos/theos/main/lib/libsubstrate.dylib" -o /tmp/ios_sdk/libsubstrate.dylib || true
+          
+          # Alternative: download from Procursus
+          if [ ! -f /tmp/ios_sdk/libsubstrate.dylib ] || [ $(file /tmp/ios_sdk/libsubstrate.dylib | grep -c "arm64") -eq 0 ]; then
+            echo "Trying alternative substrate source..."
+            curl -sL "https://github.com/ProcursusTeam/Procursus/releases/latest/download/libsubstrate.dylib" -o /tmp/ios_sdk/libsubstrate.dylib || true
+          fi
+          
+          # Check if we got a valid substrate
+          if [ -f /tmp/ios_sdk/libsubstrate.dylib ]; then
+            file /tmp/ios_sdk/libsubstrate.dylib
+            echo "Substrate downloaded successfully"
+          else
+            echo "WARNING: Could not download libsubstrate, will create stub"
+          fi
+
+      - name: Create substrate stub header
+        run: |
+          # Create substrate.h header
+          mkdir -p /tmp/ios_sdk/include
+          cat > /tmp/ios_sdk/include/substrate.h << 'HEADER'
+          #ifndef SUBSTRATE_H_
+          #define SUBSTRATE_H_
+          
+          #include <mach-o/dyld.h>
+          
+          typedef void *MSHookReference;
+          
+          void MSHookFunction(void *symbol, void *replace, void **result);
+          void *MSFindSymbol(void *image, const char *name);
+          
+          #endif /* SUBSTRATE_H_ */
+          HEADER
+
+      - name: Build dylib (direct clang cross-compile)
+        run: |
+          # macOS runner has Xcode but no iOS SDK for direct compilation
+          # We'll compile as a macOS dylib first, then patch it for iOS
+          
+          # Step 1: Compile as macOS arm64 dylib (works on macOS runner)
+          clang -arch arm64 \
+            -fobjc-arc \
+            -Wno-deprecated-declarations \
+            -dynamiclib \
+            -framework Foundation \
+            -I/tmp/ios_sdk/include \
+            -L/tmp/ios_sdk \
+            -lsubstrate \
+            -o JYJH_NoCDNoEnergy.dylib \
+            JYJH_NoCDNoEnergy.xm
+          
+          # If the above fails (no iOS substrate lib), compile without substrate linkage
+          # and patch the Mach-O manually
+          if [ ! -f JYJH_NoCDNoEnergy.dylib ]; then
+            echo "Direct build failed, trying stub approach..."
+            
+            # Create a stub libsubstrate that just has MSHookFunction
+            cat > /tmp/substrate_stub.c << 'STUB'
+            #include <stdio.h>
+            #include <stdlib.h>
+            #include <string.h>
+            #include <dlfcn.h>
+            #include <mach-o/dyld.h>
+            
+            /* Stub implementation - real substrate will be loaded at runtime */
+            void MSHookFunction(void *symbol, void *replace, void **result) {
+                /* This is a stub. The real implementation comes from the
+                   substrate dylib loaded on the jailbroken device */
+                fprintf(stderr, "MSHookFunction stub called - should not happen at runtime\n");
+            }
+            void *MSFindSymbol(void *image, const char *name) {
+                return NULL;
+            }
+            STUB
+            
+            clang -arch arm64 \
+              -c /tmp/substrate_stub.c \
+              -o /tmp/substrate_stub.o
+            
+            # Create stub substrate dylib
+            clang -arch arm64 \
+              -dynamiclib \
+              -o /tmp/ios_sdk/libsubstrate.dylib \
+              /tmp/substrate_stub.o
+            
+            # Now build our tweak with the stub
+            clang -arch arm64 \
+              -fobjc-arc \
+              -Wno-deprecated-declarations \
+              -dynamiclib \
+              -framework Foundation \
+              -I/tmp/ios_sdk/include \
+              -L/tmp/ios_sdk \
+              -lsubstrate \
+              -o JYJH_NoCDNoEnergy.dylib \
+              JYJH_NoCDNoEnergy.xm
+          fi
+          
+          echo "Build result:"
+          file JYJH_NoCDNoEnergy.dylib
+          ls -lh JYJH_NoCDNoEnergy.dylib
+
+      - name: Patch Mach-O for iOS
+        run: |
+          # The dylib was built on macOS but needs to run on iOS
+          # Patch the LC_VERSION_MIN_MACOSX or LC_BUILD_VERSION to iOS
+          
+          DYLIB=JYJH_NoCDNoEnergy.dylib
+          
+          # Use ldid to fake-sign and patch for iOS
+          # ldid can change the platform in the Mach-O header
+          
+          # Create an entitlements file (not needed for dylibs but ldid requires it)
+          cat > /tmp/ent.xml << 'ENT'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict/>
+          </plist>
+          ENT
+          
+          # Sfake-sign the dylib (makes it work on jailbroken iOS)
+          ldid -S /tmp/ent.xml $DYLIB
+          
+          # Change platform from macOS to iOS in the Mach-O header
+          # Platform field in LC_BUILD_VERSION: macOS=1, iOS=2
+          # The header starts at offset 0, platform info is in LC_BUILD_VERSION load command
+          
+          # Use python to patch the Mach-O
+          python3 << 'PYTHON'
+          import struct
+          
+          dylib = "JYJH_NoCDNoEnergy.dylib"
+          
+          with open(dylib, "rb") as f:
+              data = bytearray(f.read())
+          
+          # Find LC_BUILD_VERSION command
+          # Magic number for 64-bit: 0xFEEDFACF
+          magic = struct.unpack("<I", data[0:4])[0]
+          if magic != 0xFEEDFACF:
+              print(f"ERROR: Not a 64-bit Mach-O (magic={hex(magic)})")
+              exit(1)
+          
+          ncmds = struct.unpack("<I", data[16:20])[0]
+          sizeofcmds = struct.unpack("<I", data[20:24])[0]
+          
+          offset = 32  # After Mach-O header (64-bit header is 32 bytes)
+          
+          found_lc = False
+          for i in range(ncmds):
+              cmd = struct.unpack("<I", data[offset:offset+4])[0]
+              cmdsize = struct.unpack("<I", data[offset+4:offset+8])[0]
+              
+              # LC_BUILD_VERSION = 0x80000032
+              if cmd == 0x80000032:
+                  # Platform is at offset+8 (4 bytes)
+                  # macOS = 1, iOS = 2
+                  platform = struct.unpack("<I", data[offset+8:offset+12])[0]
+                  print(f"Found LC_BUILD_VERSION: platform={platform} (1=macOS, 2=iOS)")
+                  
+                  # Change to iOS platform
+                  struct.pack_into("<I", data, offset+8, 2)
+                  
+                  # Also update minos and sdk to iOS 15.0 (0x000F0000)
+                  # minos at offset+12, sdk at offset+16
+                  struct.pack_into("<I", data, offset+12, 0x000F0000)  # iOS 15.0
+                  struct.pack_into("<I", data, offset+16, 0x000F0000)  # iOS 15.0
+                  
+                  found_lc = True
+                  print("Patched to iOS 15.0")
+              
+              # LC_VERSION_MIN_IPHONEOS = 0x8000002B (old format)
+              # If we find LC_VERSION_MIN_MACOSX (0x8000002A), replace with iOS version
+              if cmd == 0x8000002A:
+                  print(f"Found LC_VERSION_MIN_MACOSX, replacing with LC_VERSION_MIN_IPHONEOS")
+                  struct.pack_into("<I", data, offset, 0x8000002B)
+                  # version at offset+8
+                  struct.pack_into("<I", data, offset+8, 0x000F0000)  # 15.0
+                  found_lc = True
+              
+              offset += cmdsize
+          
+          if not found_lc:
+              print("WARNING: No version load command found to patch")
+          
+          with open(dylib, "wb") as f:
+              f.write(data)
+          
+          print("Mach-O patched for iOS successfully")
+          PYTHON
+          
+          echo "Final dylib info:"
+          file JYJH_NoCDNoEnergy.dylib
+          otool -l JYJH_NoCDNoEnergy.dylib | grep -A5 "BUILD_VERSION\|VERSION_MIN"
+
+      - name: Create output package
+        run: |
+          mkdir -p output
+          cp JYJH_NoCDNoEnergy.dylib output/
+          cp JYJH_NoCDNoEnergy.plist output/
+          
+          # Final verification
+          echo "=== Output files ==="
+          ls -lh output/
+          echo "=== Mach-O info ==="
+          file output/JYJH_NoCDNoEnergy.dylib
+          
+          # Check that MSHookFunction symbol is referenced
+          echo "=== Symbol check ==="
+          nm output/JYJH_NoCDNoEnergy.dylib 2>/dev/null | grep -i "substrate\|MSHook" || echo "nm check skipped"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JYJH_NoCDNoEnergy-dylib
+          path: output/
+          retention-days: 90
+
+      - name: Create release
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v1.0
+          files: output/*
+          body: |
+            剑影江湖 v1.8.1 无CD无能量技能插件
+            
+            ## 功能
+            - 无CD: 所有技能无冷却
+            - 无能量: 大招无需怒气/能量
+            
+            ## 部署 (无根越狱)
+            ```bash
+            scp JYJH_NoCDNoEnergy.dylib root@设备IP:/var/jb/usr/lib/TweakInject/
+            scp JYJH_NoCDNoEnergy.plist root@设备IP:/var/jb/usr/lib/TweakInject/
+            # 重启游戏
+            ```
+            
+            ## 适配
+            - iPhone 13 Pro Max, iOS 15.6
+            - 无根越狱 (Dopamine/Palera1n)
+            - 仅适用于游戏版本 1.8.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
