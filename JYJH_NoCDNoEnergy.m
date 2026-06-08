@@ -1,6 +1,6 @@
 /**
- * 剑影江湖 v1.10.1 - v5.2
- * 日志写到多路径 + 悬浮球显示调试信息
+ * 剑影江湖 v1.10.1 - v5.3
+ * 大面板 + 调试信息清晰 + 日志写到游戏沙盒
  */
 
 #import <mach-o/dyld.h>
@@ -9,12 +9,12 @@
 #import <UIKit/UIKit.h>
 #import <stdio.h>
 #import <string.h>
-#import <dlfcn.h>
 
 extern void sys_icache_invalidate(void *start, size_t len);
 
 static FILE *g_logFile = NULL;
 static NSMutableArray *g_debugLines = nil;
+static UILabel *g_debugLabel = nil;
 
 static void jlog(NSString *fmt, ...) NS_FORMAT_FUNCTION(1,2);
 static void jlog(NSString *fmt, ...) {
@@ -26,27 +26,32 @@ static void jlog(NSString *fmt, ...) {
     
     if (g_debugLines) {
         [g_debugLines addObject:msg];
-        if (g_debugLines.count > 20) [g_debugLines removeObjectAtIndex:0];
+        if (g_debugLines.count > 30) [g_debugLines removeObjectAtIndex:0];
+    }
+    if (g_debugLabel) {
+        g_debugLabel.text = [g_debugLines componentsJoinedByString:@"\n"];
     }
     
-    /* 尝试多个路径写日志 */
     if (!g_logFile) {
-        const char *paths[] = {
-            "/var/mobile/Library/Caches/jyjh.log",
-            "/var/jb/tmp/jyjh.log",
-            "/tmp/jyjh.log",
-            "/var/mobile/Documents/jyjh.log",
-            NULL
-        };
-        for (int i = 0; paths[i]; i++) {
-            g_logFile = fopen(paths[i], "a");
-            if (g_logFile) { NSLog(@"[JYJH] log file opened: %s", paths[i]); break; }
+        /* 写到游戏沙盒Documents目录 */
+        NSString *home = NSHomeDirectory();
+        NSString *logPath = [home stringByAppendingPathComponent:@"Documents/jyjh.log"];
+        g_logFile = fopen([logPath UTF8String], "a");
+        if (g_logFile) NSLog(@"[JYJH] log: %@", logPath);
+        
+        if (!g_logFile) {
+            /* 备选：dylib所在目录 */
+            const char *dylib = _dyld_get_image_name(_dyld_image_count() - 1);
+            if (dylib) {
+                char path[512];
+                snprintf(path, sizeof(path), "%s", dylib);
+                char *slash = strrchr(path, '/');
+                if (slash) { strcpy(slash+1, "jyjh.log"); g_logFile = fopen(path, "a"); }
+            }
         }
+        if (!g_logFile) g_logFile = fopen("/tmp/jyjh.log", "a");
     }
-    if (g_logFile) {
-        fprintf(g_logFile, "%s\n", [msg UTF8String]);
-        fflush(g_logFile);
-    }
+    if (g_logFile) { fprintf(g_logFile, "%s\n", [msg UTF8String]); fflush(g_logFile); }
 }
 
 /* v1.10.1 偏移 */
@@ -62,14 +67,12 @@ static BOOL g_noEnergy = YES;
 static int g_damageLimit = 10000;
 static uint32_t g_orig1[2] = {0, 0};
 static uint32_t g_orig2[2] = {0, 0};
-static BOOL g_patchOK = NO;
 
 static UIView *g_panel = nil;
 static UIButton *g_btnCD = nil;
 static UIButton *g_btnEnergy = nil;
 static UISlider *g_slider = nil;
 static UILabel *g_sliderLabel = nil;
-static UILabel *g_debugLabel = nil;
 static BOOL g_panelOpen = NO;
 
 /* ====== 内存补丁 ====== */
@@ -79,7 +82,7 @@ static kern_return_t patchMem(void *addr, const void *data, size_t sz) {
                                    VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
     if (kr != KERN_SUCCESS)
         kr = vm_protect(mach_task_self(), pg, vm_page_size, 0, VM_PROT_ALL);
-    if (kr != KERN_SUCCESS) { jlog(@"vm_protect FAIL kr=%d addr=%p", kr, addr); return kr; }
+    if (kr != KERN_SUCCESS) { jlog(@"vm_protect FAIL kr=%d", kr); return kr; }
     memcpy(addr, data, sz);
     sys_icache_invalidate(addr, sz);
     vm_protect(mach_task_self(), pg, vm_page_size, 0, VM_PROT_READ | VM_PROT_EXECUTE);
@@ -88,74 +91,62 @@ static kern_return_t patchMem(void *addr, const void *data, size_t sz) {
 
 static uint64_t findBase(void) {
     uint32_t cnt = _dyld_image_count();
-    jlog(@"=== %u modules ===", cnt);
+    jlog(@"%u modules loaded", cnt);
     
-    for (uint32_t i = 0; i < cnt && i < 50; i++) {
+    /* 列出所有非系统模块 */
+    for (uint32_t i = 0; i < cnt && i < 60; i++) {
         const char *name = _dyld_get_image_name(i);
-        uint64_t h = (uint64_t)_dyld_get_image_header(i);
         if (name && !strstr(name, "/usr/lib/") && !strstr(name, "/System/")) {
-            jlog(@"[%u] %s 0x%llx", i, name, h);
+            uint64_t h = (uint64_t)_dyld_get_image_header(i);
+            jlog(@"[%u] 0x%llx %s", i, h, name);
         }
     }
     
-    /* image[0] = main executable */
-    return (uint64_t)_dyld_get_image_header(0);
+    /* image[0] = 主可执行文件 */
+    uint64_t base0 = (uint64_t)_dyld_get_image_header(0);
+    jlog(@"main exec base=0x%llx", base0);
+    
+    /* 验证偏移处是否有有效指令 */
+    uint32_t test[2];
+    memcpy(test, (void *)(base0 + OFF_CheckSkillAttackCanUse), 8);
+    jlog(@"base+0x30741B8: %08x %08x", test[0], test[1]);
+    
+    if (test[0] == 0 || test[0] == 0xFFFFFFFF) {
+        jlog(@"base[0] INVALID, searching...");
+        for (uint32_t i = 1; i < cnt; i++) {
+            uint64_t h = (uint64_t)_dyld_get_image_header(i);
+            if (h < 0x100000000) continue; /* 跳过太小的地址 */
+            memcpy(test, (void *)(h + OFF_CheckSkillAttackCanUse), 8);
+            if (test[0] != 0 && test[0] != 0xFFFFFFFF) {
+                jlog(@"FOUND [%u] 0x%llx: %08x %08x", i, h, test[0], test[1]);
+                return h;
+            }
+        }
+        jlog(@"NO valid base found!");
+    }
+    
+    return base0;
 }
 
 static void applyPatches(void) {
     if (!g_base) {
         g_base = findBase();
-        jlog(@"base=0x%llx", g_base);
+        jlog(@"Using base=0x%llx", g_base);
         
-        /* 读原始指令 */
         void *p1 = (void *)(g_base + OFF_CheckSkillAttackCanUse);
         void *p2 = (void *)(g_base + OFF_CheckSkillIsReady);
         uint32_t v1[2], v2[2];
-        memcpy(v1, p1, 8);
-        memcpy(v2, p2, 8);
-        jlog(@"@0x%llx: %08x %08x", g_base + OFF_CheckSkillAttackCanUse, v1[0], v1[1]);
-        jlog(@"@0x%llx: %08x %08x", g_base + OFF_CheckSkillIsReady, v2[0], v2[1]);
+        memcpy(v1, p1, 8); memcpy(v2, p2, 8);
+        jlog(@"CanUse @%p: %08x %08x", p1, v1[0], v1[1]);
+        jlog(@"IsReady @%p: %08x %08x", p2, v2[0], v2[1]);
         
-        /* 验证：合理的ARM64指令不应是全0或全F */
-        BOOL valid1 = (v1[0] != 0 && v1[0] != 0xFFFFFFFF);
-        BOOL valid2 = (v2[0] != 0 && v2[0] != 0xFFFFFFFF);
-        jlog(@"Valid: func1=%d func2=%d", valid1, valid2);
-        
-        if (!valid1 || !valid2) {
-            jlog(@"WARNING: bytes look invalid, base may be wrong!");
-            /* 尝试搜索正确的模块 */
-            for (uint32_t i = 0; i < _dyld_image_count(); i++) {
-                const char *name = _dyld_get_image_name(i);
-                uint64_t h = (uint64_t)_dyld_get_image_header(i);
-                if (h == 0 || h == g_base) continue;
-                uint32_t test[2];
-                memcpy(test, (void *)(h + OFF_CheckSkillAttackCanUse), 8);
-                if (test[0] != 0 && test[0] != 0xFFFFFFFF) {
-                    jlog(@"FOUND valid at [%u] %s base=0x%llx: %08x %08x", i, name ? name : "?", h, test[0], test[1]);
-                    g_base = h;
-                    memcpy(v1, (void *)(g_base + OFF_CheckSkillAttackCanUse), 8);
-                    memcpy(v2, (void *)(g_base + OFF_CheckSkillIsReady), 8);
-                    jlog(@"Switched to base=0x%llx", g_base);
-                    break;
-                }
-            }
-        }
-        
-        memcpy(g_orig1, (void *)(g_base + OFF_CheckSkillAttackCanUse), 8);
-        memcpy(g_orig2, (void *)(g_base + OFF_CheckSkillIsReady), 8);
+        memcpy(g_orig1, p1, 8); memcpy(g_orig2, p2, 8);
     }
     
     uint32_t p[] = { ARM64_MOV_W0_1, ARM64_RET };
-    kern_return_t kr1 = KERN_SUCCESS, kr2 = KERN_SUCCESS;
-    
-    if (g_noCD) kr1 = patchMem((void *)(g_base + OFF_CheckSkillAttackCanUse), p, 8);
-    else if (g_orig1[0]) patchMem((void *)(g_base + OFF_CheckSkillAttackCanUse), g_orig1, 8);
-    
-    if (g_noEnergy) kr2 = patchMem((void *)(g_base + OFF_CheckSkillIsReady), p, 8);
-    else if (g_orig2[0]) patchMem((void *)(g_base + OFF_CheckSkillIsReady), g_orig2, 8);
-    
-    g_patchOK = (kr1 == KERN_SUCCESS && kr2 == KERN_SUCCESS);
-    jlog(@"Patch: CD=%d kr=%d | Energy=%d kr=%d", g_noCD, kr1, g_noEnergy, kr2);
+    kern_return_t kr1 = g_noCD ? patchMem((void*)(g_base+OFF_CheckSkillAttackCanUse),p,8) : (patchMem((void*)(g_base+OFF_CheckSkillAttackCanUse),g_orig1,8), KERN_SUCCESS);
+    kern_return_t kr2 = g_noEnergy ? patchMem((void*)(g_base+OFF_CheckSkillIsReady),p,8) : (patchMem((void*)(g_base+OFF_CheckSkillIsReady),g_orig2,8), KERN_SUCCESS);
+    jlog(@"Patch CD=%d kr=%d E=%d kr=%d", g_noCD, kr1, g_noEnergy, kr2);
 }
 
 static void patchLimitDamage(int value) {
@@ -167,9 +158,8 @@ static void patchLimitDamage(int value) {
     patch[0] = 0x52800000 | (low << 5);
     patch[1] = high ? (0x72A00000 | (high << 5)) : ARM64_RET;
     patch[2] = ARM64_RET;
-    size_t sz = high ? 12 : 8;
-    kern_return_t kr = patchMem(addr, patch, sz);
-    jlog(@"limitDamage->%d: %s", value, kr == KERN_SUCCESS ? "OK" : "FAIL");
+    kern_return_t kr = patchMem(addr, patch, high ? 12 : 8);
+    jlog(@"limitDmg->%d: %s", value, kr==KERN_SUCCESS?"OK":"FAIL");
 }
 
 /* ====== UI ====== */
@@ -183,7 +173,7 @@ static void refreshButtons(void) {
 static void layoutPanel(UIView *bv) {
     if (!bv || !g_panel) return;
     CGRect bf = bv.frame, sc = [UIScreen mainScreen].bounds;
-    CGFloat pw = 200, ph = 250;
+    CGFloat pw = 260, ph = 400;
     CGFloat px = bf.origin.x - pw - 8;
     if (px < 4) px = bf.origin.x + bf.size.width + 8;
     CGFloat py = bf.origin.y + bf.size.height/2 - ph/2;
@@ -195,17 +185,7 @@ static void layoutPanel(UIView *bv) {
 static void togglePanel(UIView *bv) {
     g_panelOpen = !g_panelOpen;
     g_panel.hidden = !g_panelOpen;
-    if (g_panelOpen) {
-        layoutPanel(bv);
-        /* 更新调试信息 */
-        if (g_debugLabel && g_debugLines) {
-            g_debugLabel.text = [g_debugLines componentsJoinedByString:@"\n"];
-        }
-    }
-}
-
-static void updateDebugOnBall(NSString *text) {
-    /* 在悬浮球旁边显示状态 */
+    if (g_panelOpen) layoutPanel(bv);
 }
 
 @interface JYJHActionHandler : NSObject
@@ -216,19 +196,10 @@ static void updateDebugOnBall(NSString *text) {
 @end
 
 @implementation JYJHActionHandler
-+ (instancetype)shared {
-    static JYJHActionHandler *s = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{ s = [[self alloc] init]; });
-    return s;
-}
-- (void)onCD { g_noCD = !g_noCD; refreshButtons(); applyPatches(); }
-- (void)onEnergy { g_noEnergy = !g_noEnergy; refreshButtons(); applyPatches(); }
-- (void)sliderChanged:(UISlider *)slider {
-    g_damageLimit = (int)slider.value;
-    g_sliderLabel.text = [NSString stringWithFormat:@"伤害上限: %d", g_damageLimit];
-    patchLimitDamage(g_damageLimit);
-}
++ (instancetype)shared { static JYJHActionHandler *s; static dispatch_once_t o; dispatch_once(&o,^{s=[[self alloc]init];}); return s; }
+- (void)onCD { g_noCD=!g_noCD; refreshButtons(); applyPatches(); }
+- (void)onEnergy { g_noEnergy=!g_noEnergy; refreshButtons(); applyPatches(); }
+- (void)sliderChanged:(UISlider *)s { g_damageLimit=(int)s.value; g_sliderLabel.text=[NSString stringWithFormat:@"伤害上限: %d",g_damageLimit]; patchLimitDamage(g_damageLimit); }
 @end
 
 /* ====== 悬浮球 ====== */
@@ -236,29 +207,16 @@ static void updateDebugOnBall(NSString *text) {
 @end
 @implementation JYJHBallView
 - (instancetype)init {
-    self = [super initWithFrame:CGRectMake([UIScreen mainScreen].bounds.size.width - 54, 100, 44, 44)];
-    if (self) {
-        self.backgroundColor = [UIColor colorWithRed:0.1 green:0.5 blue:0.95 alpha:0.9];
-        self.layer.cornerRadius = 22;
-        self.userInteractionEnabled = YES;
-        UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(0,0,44,44)];
-        l.text = @"剑"; l.textColor = [UIColor whiteColor];
-        l.font = [UIFont boldSystemFontOfSize:18]; l.textAlignment = NSTextAlignmentCenter;
-        [self addSubview:l];
-    }
+    self=[super initWithFrame:CGRectMake([UIScreen mainScreen].bounds.size.width-54,100,44,44)];
+    if(self){self.backgroundColor=[UIColor colorWithRed:0.1 green:0.5 blue:0.95 alpha:0.9];self.layer.cornerRadius=22;self.userInteractionEnabled=YES;
+    UILabel*l=[[UILabel alloc]initWithFrame:CGRectMake(0,0,44,44)];l.text=@"剑";l.textColor=[UIColor whiteColor];l.font=[UIFont boldSystemFontOfSize:18];l.textAlignment=NSTextAlignmentCenter;[self addSubview:l];}
     return self;
 }
-- (BOOL)pointInside:(CGPoint)p withEvent:(UIEvent *)e { return CGRectContainsPoint(CGRectInset(self.bounds,-8,-8),p); }
-- (void)touchesBegan:(NSSet *)t withEvent:(UIEvent *)e { _ts=[[t anyObject] locationInView:self.superview]; _drag=NO; }
-- (void)touchesMoved:(NSSet *)t withEvent:(UIEvent *)e {
-    CGPoint c=[[t anyObject] locationInView:self.superview]; CGFloat dx=c.x-_ts.x,dy=c.y-_ts.y;
-    if(fabs(dx)>5||fabs(dy)>5){_drag=YES;CGRect f=self.frame;CGRect sc=[UIScreen mainScreen].bounds;
-    f.origin.x=MAX(0,MIN(sc.size.width-f.size.width,f.origin.x+dx));
-    f.origin.y=MAX(50,MIN(sc.size.height-f.size.height-50,f.origin.y+dy));
-    self.frame=f;_ts=c;if(g_panelOpen)layoutPanel(self);}
-}
-- (void)touchesEnded:(NSSet *)t withEvent:(UIEvent *)e { if(!_drag)togglePanel(self);_drag=NO; }
-- (void)touchesCancelled:(NSSet *)t withEvent:(UIEvent *)e { _drag=NO; }
+- (BOOL)pointInside:(CGPoint)p withEvent:(UIEvent*)e{return CGRectContainsPoint(CGRectInset(self.bounds,-8,-8),p);}
+- (void)touchesBegan:(NSSet*)t withEvent:(UIEvent*)e{_ts=[[t anyObject]locationInView:self.superview];_drag=NO;}
+- (void)touchesMoved:(NSSet*)t withEvent:(UIEvent*)e{CGPoint c=[[t anyObject]locationInView:self.superview];CGFloat dx=c.x-_ts.x,dy=c.y-_ts.y;if(fabs(dx)>5||fabs(dy)>5){_drag=YES;CGRect f=self.frame;CGRect sc=[UIScreen mainScreen].bounds;f.origin.x=MAX(0,MIN(sc.size.width-f.size.width,f.origin.x+dx));f.origin.y=MAX(50,MIN(sc.size.height-f.size.height-50,f.origin.y+dy));self.frame=f;_ts=c;if(g_panelOpen)layoutPanel(self);}}
+- (void)touchesEnded:(NSSet*)t withEvent:(UIEvent*)e{if(!_drag)togglePanel(self);_drag=NO;}
+- (void)touchesCancelled:(NSSet*)t withEvent:(UIEvent*)e{_drag=NO;}
 @end
 
 /* ====== 初始化 ====== */
@@ -269,50 +227,48 @@ static void setupUI(void) {
     if (!win)
         for (UIWindow *w in [UIApplication sharedApplication].windows)
             if (!w.isHidden) { win = w; break; }
-    if (!win) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{setupUI();});
-        return;
-    }
+    if (!win) { dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{setupUI();}); return; }
     
     JYJHBallView *ball = [[JYJHBallView alloc] init];
     [win addSubview:ball];
     
-    g_panel = [[UIView alloc] initWithFrame:CGRectMake(0,0,200,250)];
-    g_panel.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.15 alpha:0.97];
+    /* 大面板 260x400 */
+    g_panel = [[UIView alloc] initWithFrame:CGRectMake(0,0,260,400)];
+    g_panel.backgroundColor = [UIColor colorWithRed:0.08 green:0.08 blue:0.12 alpha:0.98];
     g_panel.layer.cornerRadius = 14;
     g_panel.hidden = YES;
     [win addSubview:g_panel];
     
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0,8,200,22)];
-    title.text = @"剑影江湖 v5.2"; title.textColor = [UIColor whiteColor];
-    title.font = [UIFont boldSystemFontOfSize:14]; title.textAlignment = NSTextAlignmentCenter;
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0,10,260,24)];
+    title.text = @"剑影江湖 v5.3 调试版"; title.textColor = [UIColor cyanColor];
+    title.font = [UIFont boldSystemFontOfSize:15]; title.textAlignment = NSTextAlignmentCenter;
     [g_panel addSubview:title];
     
-    g_btnCD = [UIButton buttonWithType:UIButtonTypeCustom]; g_btnCD.frame=CGRectMake(12,34,176,32);
+    g_btnCD = [UIButton buttonWithType:UIButtonTypeCustom]; g_btnCD.frame=CGRectMake(16,42,228,36);
     g_btnCD.layer.cornerRadius=8;
     [g_btnCD addTarget:[JYJHActionHandler shared] action:@selector(onCD) forControlEvents:UIControlEventTouchUpInside];
     [g_panel addSubview:g_btnCD];
     
-    g_btnEnergy = [UIButton buttonWithType:UIButtonTypeCustom]; g_btnEnergy.frame=CGRectMake(12,70,176,32);
+    g_btnEnergy = [UIButton buttonWithType:UIButtonTypeCustom]; g_btnEnergy.frame=CGRectMake(16,84,228,36);
     g_btnEnergy.layer.cornerRadius=8;
     [g_btnEnergy addTarget:[JYJHActionHandler shared] action:@selector(onEnergy) forControlEvents:UIControlEventTouchUpInside];
     [g_panel addSubview:g_btnEnergy];
     
-    g_sliderLabel = [[UILabel alloc] initWithFrame:CGRectMake(12,108,176,18)];
+    g_sliderLabel = [[UILabel alloc] initWithFrame:CGRectMake(16,128,228,20)];
     g_sliderLabel.text=@"伤害上限: 10000"; g_sliderLabel.textColor=[UIColor whiteColor];
-    g_sliderLabel.font=[UIFont systemFontOfSize:11]; [g_panel addSubview:g_sliderLabel];
+    g_sliderLabel.font=[UIFont systemFontOfSize:13]; [g_panel addSubview:g_sliderLabel];
     
-    g_slider = [[UISlider alloc] initWithFrame:CGRectMake(12,126,176,28)];
+    g_slider = [[UISlider alloc] initWithFrame:CGRectMake(16,150,228,28)];
     g_slider.minimumValue=100; g_slider.maximumValue=10000; g_slider.value=10000;
     [g_slider addTarget:[JYJHActionHandler shared] action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
     [g_panel addSubview:g_slider];
     
-    /* 调试信息区域 */
-    g_debugLabel = [[UILabel alloc] initWithFrame:CGRectMake(8,158,184,86)];
-    g_debugLabel.textColor = [UIColor greenColor];
-    g_debugLabel.font = [UIFont fontWithName:@"Menlo" size:8];
+    /* 大调试区域 - 占面板下半部分 */
+    g_debugLabel = [[UILabel alloc] initWithFrame:CGRectMake(8,186,244,204)];
+    g_debugLabel.textColor = [UIColor colorWithRed:0.2 green:1.0 blue:0.2 alpha:1.0];
+    g_debugLabel.font = [UIFont fontWithName:@"Menlo" size:10];
     g_debugLabel.numberOfLines = 0;
-    g_debugLabel.adjustsFontSizeToFitWidth = NO;
+    g_debugLabel.lineBreakMode = NSLineBreakByCharWrapping;
     [g_panel addSubview:g_debugLabel];
     
     refreshButtons();
@@ -321,7 +277,7 @@ static void setupUI(void) {
 __attribute__((constructor))
 static void initialize(void) {
     g_debugLines = [NSMutableArray new];
-    jlog(@"========== JYJH v5.2 ==========");
+    jlog(@"========== JYJH v5.3 ==========");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
         applyPatches();
         patchLimitDamage(g_damageLimit);
