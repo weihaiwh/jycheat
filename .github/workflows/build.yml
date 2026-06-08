@@ -17,16 +17,11 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq git cmake ninja-build python3 \
             libssl-dev zlib1g-dev libxml2-dev uuid-dev libbsd-dev \
-            autoconf automake libtool pkg-config clang libc++-dev libc++abi-dev \
-            xz-utils
+            autoconf automake libtool pkg-config clang libc++-dev libc++abi-dev xz-utils
 
       - name: Get iOS SDK
         run: |
-          # Clone pre-extracted iOS SDK from theos/sdks
           git clone https://github.com/theos/sdks.git --depth 1 /tmp/sdks
-          ls /tmp/sdks/
-          
-          # Pack SDK into tar.xz (cctools-port build.sh requires this format)
           cd /tmp/sdks
           tar -cJf /tmp/iPhoneOS15.6.sdk.tar.xz iPhoneOS15.6.sdk
           ls -lh /tmp/iPhoneOS15.6.sdk.tar.xz
@@ -34,54 +29,21 @@ jobs:
       - name: Build cctools-port toolchain
         run: |
           git clone https://github.com/tpoechtrager/cctools-port.git --depth 1 /tmp/cctools
-          
-          # build.sh usage: ./build.sh <SDK.tar.xz> <target_cpu>
-          # It expects the SDK as a tar.xz archive
           cd /tmp/cctools/usage_examples/ios_toolchain
-          
           ./build.sh /tmp/iPhoneOS15.6.sdk.tar.xz arm64
-          
-          # Verify toolchain
-          ls /tmp/cctools/usage_examples/ios_toolchain/target/bin/ || true
-          find /tmp/cctools -name "clang" -type f | head -5
-          find /tmp/cctools -name "ldid" -type f | head -5
-
-      - name: Build stub libsubstrate
-        run: |
-          # Find toolchain paths
-          CLANG=$(find /tmp/cctools -name "clang" -type f | head -1)
-          SDK=$(find /tmp/cctools -name "iPhoneOS*.sdk" -type d | head -1)
-          echo "clang: $CLANG"
-          echo "SDK: $SDK"
-          
-          # Create substrate header
-          mkdir -p /tmp/inc
-          cat > /tmp/inc/substrate.h << 'H'
-          #ifndef SUBSTRATE_H_
-          #define SUBSTRATE_H_
-          void MSHookFunction(void *symbol, void *replace, void **result);
-          void *MSFindSymbol(void *image, const char *name);
-          #endif
-          H
-          
-          # Stub implementation
-          cat > /tmp/stub.c << 'S'
-          void MSHookFunction(void *symbol, void *replace, void **result) {}
-          void *MSFindSymbol(void *image, const char *name) { return (void*)0; }
-          S
-          
-          # Build stub substrate
-          $CLANG \
-            -arch arm64 -miphoneos-version-min=15.0 \
-            -isysroot "$SDK" \
-            -dynamiclib -o /tmp/libsubstrate.dylib \
-            /tmp/stub.c
 
       - name: Build tweak dylib
         run: |
           CLANG=$(find /tmp/cctools -name "clang" -type f | head -1)
           SDK=$(find /tmp/cctools -name "iPhoneOS*.sdk" -type d | head -1)
+          LDID=$(find /tmp/cctools -name "ldid" -type f | head -1)
           
+          echo "clang: $CLANG"
+          echo "SDK: $SDK"
+          echo "ldid: $LDID"
+          
+          # This version uses direct memory patching - NO substrate needed!
+          # Only needs Foundation framework
           $CLANG \
             -arch arm64 \
             -miphoneos-version-min=15.0 \
@@ -89,7 +51,6 @@ jobs:
             -fobjc-arc \
             -dynamiclib \
             -framework Foundation \
-            -I/tmp/inc -L/tmp -lsubstrate \
             -install_name @executable_path/JYJH_NoCDNoEnergy.dylib \
             -o JYJH_NoCDNoEnergy.dylib \
             JYJH_NoCDNoEnergy.xm
@@ -119,6 +80,7 @@ jobs:
           body: |
             ## 剑影江湖 v1.8.1 无CD无能量技能插件
             - ✅ 无CD + 无能量
+            - 使用内存补丁方式，不依赖Substrate
             - 适配 iPhone 13 Pro Max / iOS 15.6 / 无根越狱
             ⚠️ 仅适用于 v1.8.1
         env:
