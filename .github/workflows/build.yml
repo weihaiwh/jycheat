@@ -37,13 +37,10 @@ jobs:
           TOOLCHAIN=/tmp/cctools/usage_examples/ios_toolchain/target
           export PATH="$TOOLCHAIN/bin:$PATH"
           SDK="$TOOLCHAIN/SDK/iPhoneOS15.6.sdk"
-          LD="$TOOLCHAIN/bin/arm-apple-darwin11-ld"
           
           echo "SDK: $SDK"
-          echo "LD: $LD"
-          ls "$TOOLCHAIN/bin/" | head -5
           
-          # Compile .m to .o first (separate compile step, no linking)
+          # Compile .m -> .o
           arm-apple-darwin11-clang \
             -arch arm64 \
             -miphoneos-version-min=15.0 \
@@ -54,16 +51,20 @@ jobs:
           
           echo "Compile OK, linking..."
           
-          # Link with cctools ld directly (bypass clang's linker selection)
-          arm-apple-darwin11-clang \
+          # Link with cctools ld directly (bypass clang linker)
+          # Need to add CoreGraphics + CoreFoundation + UIKit + Foundation
+          # cctools ld needs -framework + -syslibroot for frameworks
+          arm-apple-darwin11-ld \
             -arch arm64 \
             -miphoneos-version-min=15.0 \
-            -isysroot "$SDK" \
-            -fobjc-arc \
-            -dynamiclib \
+            -syslibroot "$SDK" \
+            -dynamic \
+            -dylib \
             -framework Foundation \
             -framework UIKit \
-            -Wl,-ld_classic \
+            -framework CoreGraphics \
+            -framework CoreFoundation \
+            -objc_abi_version 2 \
             -install_name @executable_path/JYJH_NoCDNoEnergy.dylib \
             -o JYJH_NoCDNoEnergy.dylib \
             JYJH_NoCDNoEnergy.o
