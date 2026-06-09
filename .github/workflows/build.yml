@@ -100,12 +100,12 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v9.1
+          tag_name: v9.2
           files: output/*
           body: |
-            ## 剑影江湖 v9.1 无CD无能量技能插件
+            ## 剑影江湖 v9.2 无CD无能量技能插件
             - ✅ 无CD + 无能量 + 伤害上限滑条
-            - v9.1: 修复进游戏后闪退 - 延迟8秒等场景加载完再patch
-            - 防止重复patch, toggle加状态检查
+            - v9.2: 修复重复patch bug + 更详细的地址和字节日志
+            - 打印函数地址方便用libtool对比验证
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

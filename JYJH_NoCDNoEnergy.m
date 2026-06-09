@@ -280,10 +280,14 @@ static void patchCanUse(BOOL enable) {
     if (!g_funcCanUse) { jlog(@"CanUse: funcAddr not found"); return; }
     
     if (enable && !g_cdPatched) {
-        // 保存原始指令 (16字节, 覆盖前4条指令确保安全)
+        // 先读当前函数前4条指令 (用于对比)
+        uint32_t *cur = (uint32_t *)g_funcCanUse;
+        jlog(@"CanUse current bytes: %08X %08X %08X %08X", cur[0], cur[1], cur[2], cur[3]);
+        
+        // 保存原始指令 (16字节)
         g_origCanUseLen = 16;
         memcpy(g_origCanUse, g_funcCanUse, g_origCanUseLen);
-        jlog(@"CanUse orig bytes: %08X %08X %08X %08X", 
+        jlog(@"CanUse saved orig: %08X %08X %08X %08X", 
              g_origCanUse[0], g_origCanUse[1], g_origCanUse[2], g_origCanUse[3]);
         
         // 直接在函数地址写 MOV W0,#1; RET
@@ -307,9 +311,12 @@ static void patchIsReady(BOOL enable) {
     if (!g_funcIsReady) { jlog(@"IsReady: funcAddr not found"); return; }
     
     if (enable && !g_energyPatched) {
+        uint32_t *cur = (uint32_t *)g_funcIsReady;
+        jlog(@"IsReady current bytes: %08X %08X %08X %08X", cur[0], cur[1], cur[2], cur[3]);
+        
         g_origIsReadyLen = 16;
         memcpy(g_origIsReady, g_funcIsReady, g_origIsReadyLen);
-        jlog(@"IsReady orig bytes: %08X %08X %08X %08X",
+        jlog(@"IsReady saved orig: %08X %08X %08X %08X",
              g_origIsReady[0], g_origIsReady[1], g_origIsReady[2], g_origIsReady[3]);
         
         kern_return_t kr = patchCode(g_funcIsReady, CODE_RETURN_TRUE, 8);
@@ -331,9 +338,12 @@ static void patchLimitDmgValue(int value) {
     if (!g_funcLimitDmg) { jlog(@"LimitDmg: funcAddr not found"); return; }
     
     if (!g_limitPatched) {
+        uint32_t *cur = (uint32_t *)g_funcLimitDmg;
+        jlog(@"LimitDmg current bytes: %08X %08X %08X %08X", cur[0], cur[1], cur[2], cur[3]);
+        
         g_origLimitDmgLen = 16;
         memcpy(g_origLimitDmg, g_funcLimitDmg, g_origLimitDmgLen);
-        jlog(@"LimitDmg orig bytes: %08X %08X %08X %08X",
+        jlog(@"LimitDmg saved orig: %08X %08X %08X %08X",
              g_origLimitDmg[0], g_origLimitDmg[1], g_origLimitDmg[2], g_origLimitDmg[3]);
     }
     
@@ -463,7 +473,7 @@ static void setupUI(void) {
     g_panel.backgroundColor=[UIColor colorWithRed:0.08 green:0.08 blue:0.12 alpha:0.98];
     g_panel.layer.cornerRadius=14; g_panel.hidden=YES; [win addSubview:g_panel];
     UILabel *title=[[UILabel alloc]initWithFrame:CGRectMake(0,10,260,24)];
-    title.text=@"\u5251\u5f71\u6c5f\u6e56 v9.1"; title.textColor=[UIColor cyanColor];
+    title.text=@"\u5251\u5f71\u6c5f\u6e56 v9.2"; title.textColor=[UIColor cyanColor];
     title.font=[UIFont boldSystemFontOfSize:15]; title.textAlignment=NSTextAlignmentCenter; [g_panel addSubview:title];
     g_btnCD=[UIButton buttonWithType:UIButtonTypeCustom]; g_btnCD.frame=CGRectMake(16,42,228,36);
     g_btnCD.layer.cornerRadius=8; [g_btnCD addTarget:[JYJHActionHandler shared] action:@selector(onCD) forControlEvents:UIControlEventTouchUpInside]; [g_panel addSubview:g_btnCD];
@@ -492,16 +502,19 @@ static void initialize(void) {
     loaded = YES;
     
     g_debugLines=[NSMutableArray new];
-    jlog(@"========== JYJH v9.1 ==========");
+    jlog(@"========== JYJH v9.2 ==========");
     jlog(@"iOS %@", [[UIDevice currentDevice] systemVersion]);
     jlog(@"Bundle %@", [[NSBundle mainBundle] bundleIdentifier]);
     jlog(@"Strategy: 直接修改游戏函数机器码 (和libtool一样)");
     
-    // 延迟8秒, 等IL2CPP运行时初始化完成 AND 游戏场景加载完成
-    // 5秒时游戏可能还在loading, 此时修改代码会导致加载流程crash
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(8.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
-        jlog(@"8s delay done, applying patches...");
+    // 延迟5秒, 等IL2CPP运行时初始化完成
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(5.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+        jlog(@"5s delay done, applying patches...");
         applyAllPatches();
-        setupUI();
+        
+        // 等3秒后再显示UI (让patch先生效)
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+            setupUI();
+        });
     });
 }
