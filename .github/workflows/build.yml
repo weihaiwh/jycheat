@@ -1,4 +1,4 @@
-name: Build JYJH NoCD NoEnergy Dylib (v11 Scan+Dobby)
+name: Build JYJH NoCD NoEnergy Dylib (v12 Precise)
 
 on:
   push:
@@ -82,14 +82,14 @@ jobs:
           ls -la "$DOBBY_LIB" || { echo "Dobby lib not found!"; exit 1; }
           
           # Compile .m -> .o (include dobby.h from project root)
-          # v11: 使用新的v11源文件
+          # v12: 精确方法名匹配
           arm-apple-darwin11-clang \
             -arch arm64 \
             -miphoneos-version-min=15.0 \
             -isysroot "$SDK" \
             -fobjc-arc \
             -I. \
-            -c JYJH_NoCDNoEnergy_v11.m \
+            -c JYJH_NoCDNoEnergy_v12.m \
             -o JYJH_NoCDNoEnergy.o
           
           echo "Compile OK, linking with Dobby..."
@@ -134,14 +134,16 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v11.0
+          tag_name: v12.0
           files: output/*
           body: |
-            ## 剑影江湖 v11.0 - IL2CPP方法扫描 + Dobby Hook
+            ## 剑影江湖 v12.0 - 精确方法Hook (基于dump分析)
             - ✅ 无CD + 无能量 + 无限怒气 + 伤害上限滑条
-            - v11.0: 扫描IL2CPP所有方法名, 自动发现怒气/大招/级别相关函数
-            - 新增"无限怒气"按钮, hook所有发现的怒气检查/大招校验函数
-            - dump所有相关方法到 Documents/jyjh_methods.txt 供分析
-            - 保留v10.0的Dobby inline hook机制
+            - v12.0: 基于IL2CPP dump精确hook游戏逻辑函数
+            - 新增: CheckSkillUnlock→true (忽略30级解锁限制)
+            - 新增: CanUseExSkill→true (大招可用)
+            - 新增: IsExSkillInCD→false (大招不在CD)
+            - 新增: SkillModel.CheckSkill→true
+            - 修复: v11.0关键词匹配到.NET基础库函数的问题
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
