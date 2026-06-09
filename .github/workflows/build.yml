@@ -52,11 +52,10 @@ jobs:
           echo "Compile OK, linking..."
           
           # Link with cctools ld directly (bypass clang linker)
-          # Need to add CoreGraphics + CoreFoundation + UIKit + Foundation
-          # cctools ld needs -framework + -syslibroot for frameworks
+          # cctools ld uses -iphoneos_version_min (NOT -miphoneos-version-min which is clang-only)
           arm-apple-darwin11-ld \
             -arch arm64 \
-            -miphoneos-version-min=15.0 \
+            -iphoneos_version_min 15.0 \
             -syslibroot "$SDK" \
             -dynamic \
             -dylib \
