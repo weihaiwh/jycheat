@@ -1,42 +1,32 @@
 /**
- * 剑影江湖 v8.1 - IL2CPP运行时方法指针替换
+ * 剑影江湖 v8.2 - IL2CPP运行时方法指针替换
  * 
- * v8.0→v8.1 修复的Bug:
+ * v8.1→v8.2 修复的Bug:
  * 
- * Bug 4: patchMem把MethodInfo数据页设为RX导致闪退
- *   原代码: vm_protect(WRITE|COPY) → memcpy → vm_protect(READ|EXECUTE)
- *   问题: MethodInfo在数据段, 设为RX后游戏IL2CPP运行时无法写入同页的其他MethodInfo
- *   闪退原因: 游戏在运行时需要动态修改MethodInfo数据(如JIT编译结果),
- *             被锁为RX后触发EXC_BAD_ACCESS
- *   修复: 不再设数据页为RX, 修改后保持RW权限, 让游戏可以正常操作
+ * Bug 7 (闪退): applyPatches()在toggle ON时重写代码页(RX→RW→写→RX)
+ *   toggle OFF→ON时, 代码页已经是RX, applyPatches尝试写代码到RX页→EXC_BAD_ACCESS
+ *   修复: applyPatches只替换methodPointer, 不重写代码页
+ *         代码页在初始化时一次性写好, 之后只通过patchLimitDamage修改return_value区域
  *
- * Bug 5: UI使用deprecated API获取window
- *   [UIApplication sharedApplication].windows 在iOS 15已deprecated
- *   修复: 使用UIWindowScene.windows获取keyWindow
+ * Bug 8 (闪退): makeCodeExecutable把代码页设为RX, 但slider拖动需要RW
+ *   makeCodeWritable(RX→RW)和makeCodeExecutable(RW→RX)频繁切换
+ *   在切换期间如果游戏调用替换代码, RX→RW瞬间代码不可执行→crash
+ *   修复: 代码页设为RWX (VM_PROT_READ|VM_PROT_WRITE|VM_PROT_EXECUTE)
+ *         这是用户空间内存, 安全性不是问题; 避免RW↔RX切换的竞态条件
  *
- * Bug 6: dylib可能被重复加载 (日志出现两次初始化)
- *   修复: 添加static BOOL防止重复初始化
+ * Bug 9 (伤害无效): get_limitDamage是C#属性getter, 替换methodPointer后
+ *   IL2CPP的invoker仍然用原签名调用, 0参数方法返回值被正确处理
+ *   真实原因: patchLimitDamage中static ptrPatched在游戏重启后不重置
+ *   但更关键的是: 需要确认代码页是否可写再修改
+ *   修复: 统一使用RWX权限, 消除写入失败的可能性
  *
- * v7.4→v8.0 修复的致命Bug:
- * 
- * Bug 1: STP寄存器编码错误
- *   0xA90153F3 = STP x19,x19 (错!)  →  0xA9014FF3 = STP x19,x20 (对)
- *   所有callee-saved寄存器对编码都有问题
- *   根本原因: ARM64 STP格式 Rt1[4:0] Rn[9:5] Rt2[14:10], 原编码搞反了Rt1/Rt2
+ * v8.0→v8.1 修复:
+ *   Bug 4: patchMem把数据页设为RX导致闪退 → 保持RW
+ *   Bug 5: UI用deprecated windows API → UIWindowScene
+ *   Bug 6: dylib重复加载 → static guard
  *
- * Bug 2: writeReturnTrue/writeReturnValue 不需要保存callee-saved寄存器!
- *   这些函数是IL2CPP的方法替换代码, 被调用时直接return, 不调用任何子函数
- *   保存/恢复6对寄存器完全是多余的, 而且因为编码错误导致栈帧被破坏
- *   修复: return true 只需 mov w0,#1; ret (2条指令=8字节)
- *   修复: return value 只需 movz w0,#val; ret (2-3条指令=8-12字节)
- *
- * Bug 3: patchLimitDamage先vm_protect(WRITE)整页, 再writeReturnValue
- *   但code1(返回true)和codeLimitDmg在同一页, vm_protect(EXECUTE)会锁住
- *   后续无法再写入, 导致slider拖动时vm_protect失败
- *   修复: vm_allocate出来的内存已经是RW, 写完后一次性设为RX即可
- *
- * 新增: il2cpp_method_get_param_count验证, 确保找到正确的方法
- * 新增: 详尽的日志输出, 方便排查问题
+ * v7.4→v8.0 修复:
+ *   Bug 1-3: STP编码/寄存器保存/vm_protect竞态
  */
 
 #import <mach-o/dyld.h>
@@ -89,7 +79,7 @@ static void *g_origPtrCanUse = NULL;
 static void *g_origPtrIsReady = NULL;
 static void *g_origPtrLimitDmg = NULL;
 
-// vm_allocate分配的可执行代码页
+// vm_allocate分配的可执行代码页 (RWX权限, 不需要切换)
 static void *g_codeMem = NULL;
 static vm_size_t g_codeMemSize = 0;
 
@@ -100,6 +90,9 @@ static vm_size_t g_codeMemSize = 0;
 static void *g_codeReturnTrue1 = NULL;  // CheckSkillAttackCanUse -> return true
 static void *g_codeReturnTrue2 = NULL;  // CheckSkillIsReady -> return true
 static void *g_codeReturnValue = NULL;  // get_limitDamage -> return value
+
+// 伤害上限是否已patch
+static BOOL g_limitDmgPatched = NO;
 
 // UI
 static UIView *g_panel = nil;
@@ -118,43 +111,21 @@ static BOOL g_panelOpen = NO;
  * 
  * IL2CPP的MethodInfo结构在GameAssembly.dll的数据段, 不是代码段.
  * 数据段默认是RW, 所以直接memcpy写入即可.
- * 
- * 如果写入失败(页权限问题), 用vm_protect临时设为RW, 写完不要改回RX!
- * 因为数据段上还有其他MethodInfo, 游戏后续还需要修改它们.
- * 设为RX会导致:
- *   1) 后续patchMem无法再写入同页的其他MethodInfo
- *   2) 游戏自身的IL2CPP代码也无法写入同页数据
- *   3) 最终触发EXC_BAD_ACCESS闪退
+ * 写完后不要改回RX! 数据段需要保持可写.
  */
 static kern_return_t patchMem(void *addr, const void *data, size_t sz) {
     if (!addr) return KERN_INVALID_ADDRESS;
     
     // 尝试直接写入 (IL2CPP数据段通常已经是RW)
-    // 先用vm_read_overwrite测试是否可写
-    vm_size_t outSize = 0;
-    void *testBuf = NULL;
-    kern_return_t kr;
-    
-    // 分配临时buffer, 读取当前值作为验证
-    testBuf = malloc(sz);
-    if (!testBuf) return KERN_RESOURCE_SHORTAGE;
-    
-    kr = vm_read_overwrite(mach_task_self(), (vm_address_t)addr, sz, (vm_address_t)testBuf, &outSize);
-    if (kr == KERN_SUCCESS && outSize == sz) {
-        // 可读, 尝试直接写入
-        memcpy(addr, data, sz);
-        // 验证写入是否成功
-        if (memcmp(addr, data, sz) == 0) {
-            free(testBuf);
-            return KERN_SUCCESS;
-        }
+    memcpy(addr, data, sz);
+    if (memcmp(addr, data, sz) == 0) {
+        return KERN_SUCCESS;
     }
-    free(testBuf);
     
-    // 直接写入失败, 需要临时修改页权限为RW
+    // 直接写入失败, 需要修改页权限为RW
     vm_address_t pg = (vm_address_t)addr & ~(vm_page_size - 1);
-    kr = vm_protect(mach_task_self(), pg, vm_page_size, 0,
-                    VM_PROT_READ | VM_PROT_WRITE);
+    kern_return_t kr = vm_protect(mach_task_self(), pg, vm_page_size, 0,
+                                   VM_PROT_READ | VM_PROT_WRITE);
     if (kr != KERN_SUCCESS) {
         jlog(@"patchMem vm_protect RW FAIL addr=%p kr=%d", addr, kr);
         return kr;
@@ -162,7 +133,6 @@ static kern_return_t patchMem(void *addr, const void *data, size_t sz) {
     
     memcpy(addr, data, sz);
     
-    // 验证写入成功
     if (memcmp(addr, data, sz) == 0) {
         return KERN_SUCCESS;
     }
@@ -187,15 +157,6 @@ typedef const char* (*Il2CppClassGetName)(void*);
 
 // ============================================================
 // 从MethodInfo读取methodPointer
-// 
-// IL2CPP MethodInfo结构 (Unity 2019+ / il2cpp v29+):
-//   offset 0x00: MethodPointer methodPointer  (8 bytes on arm64)
-//   offset 0x08: InvokerMethod invoker_method (8 bytes)
-//   offset 0x10: const char* name
-//   offset 0x18: Il2CppClass* klass
-//   ...
-//
-// 注意: 不同Unity版本offset可能不同, getMethodPointer做了2个偏移的尝试
 // ============================================================
 
 static void* getMethodPointer(void *methodInfo) {
@@ -208,7 +169,6 @@ static void* getMethodPointer(void *methodInfo) {
         vm_size_t outSize = 0; uint32_t test;
         kern_return_t kr = vm_read_overwrite(mach_task_self(),
             (vm_address_t)ptr, 4, (vm_address_t)&test, &outSize);
-        // 验证: 可读, 且内容看起来像ARM64指令(不是0或0xFFFFFFFF)
         if (kr == KERN_SUCCESS && test != 0 && test != 0xFFFFFFFF) {
             jlog(@"  methodPointer@0: %p (verify: 0x%08X)", ptr, test);
             return ptr;
@@ -233,27 +193,14 @@ static void* getMethodPointer(void *methodInfo) {
 
 // ============================================================
 // 查找IL2CPP方法
-// 
-// 核心思路 (参考libtool的IL2CPP bridge):
-// 1. dlopen(NULL) 获取主可执行文件的符号
-// 2. dlsym查找il2cpp_domain_get等运行时API
-// 3. 遍历Assembly → Image → Class → Method
-// 4. 通过方法名匹配找到目标MethodInfo
-// 5. 从MethodInfo读取methodPointer (函数的真实机器码地址)
-// 6. 用vm_allocate分配新代码, 替换MethodInfo->methodPointer
-//
-// 这比硬编码偏移好得多, 因为:
-// - 游戏更新后偏移会变, 但方法名不变
-// - IL2CPP运行时API地址通过dlsym获取, 自动适配
 // ============================================================
 
 static void findIL2CPP(void) {
-    jlog(@"=== v8.0 IL2CPP Runtime Search ===");
+    jlog(@"=== v8.2 IL2CPP Runtime Search ===");
     
     void *h = dlopen(NULL, RTLD_LAZY);
     if (!h) { jlog(@"dlopen FAIL"); return; }
     
-    // 获取IL2CPP运行时API
     Il2CppDomainGet domain_get = dlsym(h, "il2cpp_domain_get");
     Il2CppDomainGetAssemblies get_assemblies = dlsym(h, "il2cpp_domain_get_assemblies");
     Il2CppAssemblyGetImage get_image = dlsym(h, "il2cpp_assembly_get_image");
@@ -293,7 +240,6 @@ static void findIL2CPP(void) {
             void *klass = get_class(img, c);
             if (!klass) continue;
             
-            // 记录当前类名 (用于调试)
             const char *cn = class_name ? class_name(klass) : NULL;
             
             void *iter = NULL;
@@ -303,7 +249,6 @@ static void findIL2CPP(void) {
                 const char *n = method_name(m);
                 if (!n) continue;
                 
-                // CheckSkillAttackCanUse: 技能可用检查 → return true = 无CD
                 if (strcmp(n, "CheckSkillAttackCanUse") == 0 && !g_infoCanUse) {
                     uint32_t pc = param_count ? param_count(m) : 0;
                     jlog(@"FOUND CheckSkillAttackCanUse class=%s params=%u", cn ?: "?", pc);
@@ -311,7 +256,6 @@ static void findIL2CPP(void) {
                     g_origPtrCanUse = getMethodPointer(m);
                     found++;
                 }
-                // CheckSkillIsReady: 技能就绪检查 → return true = 无能量
                 else if (strcmp(n, "CheckSkillIsReady") == 0 && !g_infoIsReady) {
                     uint32_t pc = param_count ? param_count(m) : 0;
                     jlog(@"FOUND CheckSkillIsReady class=%s params=%u", cn ?: "?", pc);
@@ -319,7 +263,6 @@ static void findIL2CPP(void) {
                     g_origPtrIsReady = getMethodPointer(m);
                     found++;
                 }
-                // get_limitDamage: 伤害上限 → return 自定义值
                 else if (strcmp(n, "get_limitDamage") == 0 && !g_infoLimitDmg) {
                     uint32_t pc = param_count ? param_count(m) : 0;
                     jlog(@"FOUND get_limitDamage class=%s params=%u", cn ?: "?", pc);
@@ -340,27 +283,8 @@ static void findIL2CPP(void) {
 
 // ============================================================
 // ARM64代码生成
-//
-// 关键修复: return true/return value 不需要保存callee-saved寄存器!
-// 
-// 原因: 我们的替换代码只是返回一个常量值, 不调用任何子函数,
-// 不会修改任何callee-saved寄存器(x19-x28, x29/fp, x30/lr).
-// 调用者保存/恢复寄存器是调用约定的责任, 被调用方不需要操心.
-//
-// 如果硬要保存, 编码还搞错了, 那就是双重bug.
-//
-// 正确的替换代码:
-//   return true:  mov w0, #1; ret        (2条指令=8字节)
-//   return value: movz w0, #val; ret     (2-3条指令=8-12字节)
 // ============================================================
 
-/**
- * 在addr写入 return true 代码
- * ARM64:
- *   MOV W0, #1     ; 0x52800020
- *   RET            ; 0xD65F03C0
- * 共8字节
- */
 static void writeReturnTrue(void *addr) {
     uint32_t *c = (uint32_t *)addr;
     c[0] = 0x52800020;  // MOV W0, #1
@@ -368,14 +292,6 @@ static void writeReturnTrue(void *addr) {
     sys_icache_invalidate(addr, 8);
 }
 
-/**
- * 在addr写入 return value 代码
- * ARM64:
- *   MOVZ W0, #low16    ; 0x52800000 | (low << 5)
- *   MOVK W0, #high16, LSL#16  ; 0x72A00000 | (high << 5)  (仅当high!=0)
- *   RET                ; 0xD65F03C0
- * 共8-12字节
- */
 static void writeReturnValue(void *addr, int value) {
     uint32_t *c = (uint32_t *)addr;
     uint32_t low = value & 0xFFFF;
@@ -388,11 +304,15 @@ static void writeReturnValue(void *addr, int value) {
 }
 
 // ============================================================
-// 分配可执行代码内存并写入替换代码
+// 分配可执行代码内存
 //
-// vm_allocate分配的内存默认是VM_PROT_READ|VM_PROT_WRITE
-// 写入代码后, 一次性设为VM_PROT_READ|VM_PROT_EXECUTE
-// 这样就不会有patchLimitDamage破坏code1/code2的问题
+// v8.2关键改进: 使用RWX权限, 避免RW↔RX切换的竞态条件
+// 
+// 之前: 初始化时RW→写代码→RX, slider时RX→RW→写→RX
+// 问题: RX→RW瞬间, 如果游戏调用替换代码→EXC_BAD_ACCESS
+//       RX→RW→RX频繁切换, 在切换窗口期crash
+// 修复: 一次性设为RWX, 永远不需要切换权限
+//       安全性不是问题: 这是用户空间内存, 不涉及系统安全
 // ============================================================
 
 static BOOL allocCodeMem(void) {
@@ -409,126 +329,111 @@ static BOOL allocCodeMem(void) {
     g_codeMem = (void *)addr;
     g_codeMemSize = vm_page_size;
     
-    // 布局: 每个替换函数占16字节对齐
-    g_codeReturnTrue1 = (char *)g_codeMem + 0x000;   // 8 bytes code + 8 pad
-    g_codeReturnTrue2 = (char *)g_codeMem + 0x010;   // 8 bytes code + 8 pad
-    g_codeReturnValue = (char *)g_codeMem + 0x020;   // 12 bytes code + 4 pad
+    // 设为RWX - 一次性, 之后永远不需要切换权限
+    kr = vm_protect(mach_task_self(), addr, vm_page_size, 0,
+                    VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+    if (kr != KERN_SUCCESS) {
+        jlog(@"vm_protect RWX FAIL kr=%d, trying VM_PROT_ALL", kr);
+        kr = vm_protect(mach_task_self(), addr, vm_page_size, 0, VM_PROT_ALL);
+        if (kr != KERN_SUCCESS) {
+            jlog(@"vm_protect VM_PROT_ALL FAIL kr=%d", kr);
+            vm_deallocate(mach_task_self(), addr, vm_page_size);
+            g_codeMem = NULL;
+            return NO;
+        }
+    }
     
-    jlog(@"codeMem=%p size=%zu", g_codeMem, g_codeMemSize);
+    // 布局: 每个替换函数占16字节对齐
+    g_codeReturnTrue1 = (char *)g_codeMem + 0x000;
+    g_codeReturnTrue2 = (char *)g_codeMem + 0x010;
+    g_codeReturnValue = (char *)g_codeMem + 0x020;
+    
+    // 一次性写入所有替换代码
+    writeReturnTrue(g_codeReturnTrue1);
+    writeReturnTrue(g_codeReturnTrue2);
+    writeReturnValue(g_codeReturnValue, g_damageLimit);
+    
+    jlog(@"codeMem=%p size=%zu (RWX)", g_codeMem, g_codeMemSize);
     jlog(@"  return_true1=%p", g_codeReturnTrue1);
     jlog(@"  return_true2=%p", g_codeReturnTrue2);
     jlog(@"  return_value=%p", g_codeReturnValue);
     return YES;
 }
 
-/**
- * 将代码页设为可执行
- * 在所有代码写完后调用一次
- */
-static void makeCodeExecutable(void) {
-    if (!g_codeMem) return;
-    vm_address_t pg = (vm_address_t)g_codeMem & ~(vm_page_size - 1);
-    // 先刷新整个代码区的icache
-    sys_icache_invalidate(g_codeMem, 64);
-    // 设为只读+可执行
-    kern_return_t kr = vm_protect(mach_task_self(), pg, vm_page_size, 0,
-                                   VM_PROT_READ | VM_PROT_EXECUTE);
-    jlog(@"makeCodeExecutable kr=%d", kr);
-}
+// ============================================================
+// 应用补丁 - 只替换methodPointer, 不重写代码
+// ============================================================
 
-/**
- * 将代码页临时设为可写 (用于修改return_value)
- */
-static void makeCodeWritable(void) {
-    if (!g_codeMem) return;
-    vm_address_t pg = (vm_address_t)g_codeMem & ~(vm_page_size - 1);
-    kern_return_t kr = vm_protect(mach_task_self(), pg, vm_page_size, 0,
-                                   VM_PROT_READ | VM_PROT_WRITE);
-    if (kr != KERN_SUCCESS) {
-        kr = vm_protect(mach_task_self(), pg, vm_page_size, 0, VM_PROT_ALL);
+static void applyCanUse(BOOL enable) {
+    if (!g_infoCanUse) return;
+    
+    if (enable) {
+        // 指向return_true1代码
+        kern_return_t kr = patchMem(g_infoCanUse, &g_codeReturnTrue1, sizeof(void*));
+        jlog(@"CanUse: %s (%p -> %p) kr=%d", enable ? "ON" : "OFF", g_origPtrCanUse, g_codeReturnTrue1, kr);
+    } else {
+        // 恢复原始指针
+        kern_return_t kr = patchMem(g_infoCanUse, &g_origPtrCanUse, sizeof(void*));
+        jlog(@"CanUse: OFF (restore %p) kr=%d", g_origPtrCanUse, kr);
     }
-    jlog(@"makeCodeWritable kr=%d", kr);
 }
 
-// ============================================================
-// 应用补丁
-// ============================================================
+static void applyIsReady(BOOL enable) {
+    if (!g_infoIsReady) return;
+    
+    if (enable) {
+        kern_return_t kr = patchMem(g_infoIsReady, &g_codeReturnTrue2, sizeof(void*));
+        jlog(@"IsReady: %s (%p -> %p) kr=%d", enable ? "ON" : "OFF", g_origPtrIsReady, g_codeReturnTrue2, kr);
+    } else {
+        kern_return_t kr = patchMem(g_infoIsReady, &g_origPtrIsReady, sizeof(void*));
+        jlog(@"IsReady: OFF (restore %p) kr=%d", g_origPtrIsReady, kr);
+    }
+}
 
-static void applyPatches(void) {
+static void applyLimitDmg(BOOL enable) {
+    if (!g_infoLimitDmg) return;
+    
+    if (enable) {
+        kern_return_t kr = patchMem(g_infoLimitDmg, &g_codeReturnValue, sizeof(void*));
+        jlog(@"LimitDmg: ON (%p -> %p) kr=%d", g_origPtrLimitDmg, g_codeReturnValue, kr);
+        g_limitDmgPatched = YES;
+    } else {
+        kern_return_t kr = patchMem(g_infoLimitDmg, &g_origPtrLimitDmg, sizeof(void*));
+        jlog(@"LimitDmg: OFF (restore %p) kr=%d", g_origPtrLimitDmg, kr);
+        g_limitDmgPatched = NO;
+    }
+}
+
+static void applyAllPatches(void) {
     // 第一步: 查找IL2CPP方法
     if (!g_infoCanUse) findIL2CPP();
     
-    // 第二步: 分配代码内存
+    // 第二步: 分配代码内存并写入替换代码 (RWX)
     if (!allocCodeMem()) return;
     
-    // 第三步: 写入替换代码 (此时内存是RW)
-    writeReturnTrue(g_codeReturnTrue1);
-    writeReturnTrue(g_codeReturnTrue2);
-    writeReturnValue(g_codeReturnValue, g_damageLimit);
+    // 第三步: 替换methodPointer
+    if (g_noCD) applyCanUse(YES);
+    if (g_noEnergy) applyIsReady(YES);
+    applyLimitDmg(YES);
     
-    // 第四步: 设为可执行 (此时内存变为RX)
-    makeCodeExecutable();
-    
-    // 第五步: 替换MethodInfo->methodPointer
-    // 这修改的是GameAssembly.dll的数据段, 需要patchMem
-    if (g_noCD && g_infoCanUse && g_origPtrCanUse) {
-        kern_return_t kr = patchMem(g_infoCanUse, &g_codeReturnTrue1, sizeof(void*));
-        jlog(@"CanUse: %p -> %p kr=%d", g_origPtrCanUse, g_codeReturnTrue1, kr);
-    } else if (!g_infoCanUse) {
-        jlog(@"CanUse: MethodInfo not found, skip");
-    } else if (!g_origPtrCanUse) {
-        jlog(@"CanUse: methodPointer is NULL, skip");
-    }
-    
-    if (g_noEnergy && g_infoIsReady && g_origPtrIsReady) {
-        kern_return_t kr = patchMem(g_infoIsReady, &g_codeReturnTrue2, sizeof(void*));
-        jlog(@"IsReady: %p -> %p kr=%d", g_origPtrIsReady, g_codeReturnTrue2, kr);
-    } else if (!g_infoIsReady) {
-        jlog(@"IsReady: MethodInfo not found, skip");
-    } else if (!g_origPtrIsReady) {
-        jlog(@"IsReady: methodPointer is NULL, skip");
-    }
-    
-    jlog(@"applyPatches done");
+    jlog(@"applyAllPatches done");
 }
 
 static void patchLimitDamage(int value) {
-    if (!g_infoLimitDmg || !g_codeMem) {
-        jlog(@"patchLimitDamage: not ready (info=%p code=%p)", g_infoLimitDmg, g_codeMem);
+    if (!g_codeReturnValue || !g_codeMem) {
+        jlog(@"patchLimitDamage: not ready");
         return;
     }
     
-    // 临时设为可写
-    makeCodeWritable();
-    // 写入新的返回值代码
+    // RWX权限, 直接写, 无需切换权限
     writeReturnValue(g_codeReturnValue, value);
-    // 设回可执行
-    makeCodeExecutable();
     
-    // 替换MethodInfo指针 (只需做一次, 后续只需改代码内容)
-    static BOOL ptrPatched = NO;
-    if (!ptrPatched && g_origPtrLimitDmg) {
-        kern_return_t kr = patchMem(g_infoLimitDmg, &g_codeReturnValue, sizeof(void*));
-        jlog(@"LimitDmg: %p -> %p kr=%d", g_origPtrLimitDmg, g_codeReturnValue, kr);
-        ptrPatched = (kr == KERN_SUCCESS);
+    // 如果还没替换methodPointer, 现在替换
+    if (!g_limitDmgPatched && g_infoLimitDmg) {
+        applyLimitDmg(YES);
     }
-}
-
-/**
- * 恢复原始方法指针 (关闭开关时调用)
- */
-static void restoreCanUse(void) {
-    if (g_infoCanUse && g_origPtrCanUse) {
-        kern_return_t kr = patchMem(g_infoCanUse, &g_origPtrCanUse, sizeof(void*));
-        jlog(@"Restore CanUse: kr=%d", kr);
-    }
-}
-
-static void restoreIsReady(void) {
-    if (g_infoIsReady && g_origPtrIsReady) {
-        kern_return_t kr = patchMem(g_infoIsReady, &g_origPtrIsReady, sizeof(void*));
-        jlog(@"Restore IsReady: kr=%d", kr);
-    }
+    
+    jlog(@"patchLimitDamage: value=%d", value);
 }
 
 // ============================================================
@@ -567,13 +472,12 @@ static void togglePanel(UIView *bv) {
 + (instancetype)shared { static JYJHActionHandler *s; static dispatch_once_t o; dispatch_once(&o,^{s=[[self alloc]init];}); return s; }
 - (void)onCD {
     g_noCD=!g_noCD; refreshButtons();
-    if(g_noCD) applyPatches();
-    else restoreCanUse();
+    // 只切换methodPointer, 不重写代码页
+    applyCanUse(g_noCD);
 }
 - (void)onEnergy {
     g_noEnergy=!g_noEnergy; refreshButtons();
-    if(g_noEnergy) applyPatches();
-    else restoreIsReady();
+    applyIsReady(g_noEnergy);
 }
 - (void)sliderChanged:(UISlider *)s {
     g_damageLimit=(int)s.value;
@@ -599,7 +503,6 @@ static void togglePanel(UIView *bv) {
 @end
 
 static UIWindow *getKeyWindow(void) {
-    // iOS 15+ 推荐使用 UIWindowScene.windows
     if (@available(iOS 15.0, *)) {
         for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
             if (scene.activationState == UISceneActivationStateForegroundActive &&
@@ -613,7 +516,6 @@ static UIWindow *getKeyWindow(void) {
             }
         }
     }
-    // Fallback for iOS < 15
     for (UIWindow *w in [UIApplication sharedApplication].windows) {
         if (w.isKeyWindow && !w.isHidden) return w;
     }
@@ -631,7 +533,7 @@ static void setupUI(void) {
     g_panel.backgroundColor=[UIColor colorWithRed:0.08 green:0.08 blue:0.12 alpha:0.98];
     g_panel.layer.cornerRadius=14; g_panel.hidden=YES; [win addSubview:g_panel];
     UILabel *title=[[UILabel alloc]initWithFrame:CGRectMake(0,10,260,24)];
-    title.text=@"\u5251\u5f71\u6c5f\u6e56 v8.1"; title.textColor=[UIColor cyanColor];
+    title.text=@"\u5251\u5f71\u6c5f\u6e56 v8.2"; title.textColor=[UIColor cyanColor];
     title.font=[UIFont boldSystemFontOfSize:15]; title.textAlignment=NSTextAlignmentCenter; [g_panel addSubview:title];
     g_btnCD=[UIButton buttonWithType:UIButtonTypeCustom]; g_btnCD.frame=CGRectMake(16,42,228,36);
     g_btnCD.layer.cornerRadius=8; [g_btnCD addTarget:[JYJHActionHandler shared] action:@selector(onCD) forControlEvents:UIControlEventTouchUpInside]; [g_panel addSubview:g_btnCD];
@@ -655,21 +557,18 @@ static void setupUI(void) {
 
 __attribute__((constructor))
 static void initialize(void) {
-    // 防止重复加载
     static BOOL loaded = NO;
     if (loaded) { jlog(@"Already loaded, skip"); return; }
     loaded = YES;
     
     g_debugLines=[NSMutableArray new];
-    jlog(@"========== JYJH v8.1 ==========");
+    jlog(@"========== JYJH v8.2 ==========");
     jlog(@"iOS %@", [[UIDevice currentDevice] systemVersion]);
     jlog(@"Bundle %@", [[NSBundle mainBundle] bundleIdentifier]);
     
-    // 延迟5秒, 等待IL2CPP运行时初始化完成
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(5.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
         jlog(@"5s delay done, applying patches...");
-        applyPatches();
-        patchLimitDamage(g_damageLimit);
+        applyAllPatches();
         setupUI();
     });
 }

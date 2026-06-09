@@ -100,13 +100,13 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v8.1
+          tag_name: v8.2
           files: output/*
           body: |
-            ## 剑影江湖 v8.1 无CD无能量技能插件
+            ## 剑影江湖 v8.2 无CD无能量技能插件
             - ✅ 无CD + 无能量 + 伤害上限滑条
-            - v8.1: 修复patchMem把数据页设为RX导致闪退的致命Bug
-            - 使用IL2CPP运行时API + MethodInfo指针替换，不依赖Substrate
-            - 适配 iOS 15+ / 无根越狱 / TrollStore
+            - v8.2: 修复toggle OFF→ON闪退 + 伤害滑条无效
+            - 使用RWX代码页消除RW↔RX切换竞态条件
+            - toggle只替换methodPointer, 不重写代码页
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
