@@ -40,6 +40,12 @@ jobs:
           
           echo "SDK: $SDK"
           
+          # Verify system libraries exist in SDK
+          echo "=== Checking system libraries ==="
+          ls -la "$SDK/usr/lib/libSystem.dylib" 2>/dev/null || echo "libSystem.dylib NOT FOUND"
+          ls -la "$SDK/usr/lib/libobjc.dylib" 2>/dev/null || echo "libobjc.dylib NOT FOUND"
+          ls "$SDK/usr/lib/" | head -30
+          
           # Compile .m -> .o
           arm-apple-darwin11-clang \
             -arch arm64 \
@@ -51,8 +57,11 @@ jobs:
           
           echo "Compile OK, linking..."
           
-          # Link with cctools ld directly (bypass clang linker)
-          # cctools ld uses -iphoneos_version_min (NOT -miphoneos-version-min which is clang-only)
+          # Link with cctools ld directly (bypass clang which invokes wrong host ld)
+          # Must explicitly add system libraries that Apple ld auto-links:
+          #   -lSystem (libc, libdispatch, libdyld, libmacho, etc.)
+          #   -lobjc (Objective-C runtime, blocks runtime)
+          #   -lc++ (C++ standard library, needed by Foundation)
           arm-apple-darwin11-ld \
             -arch arm64 \
             -iphoneos_version_min 15.0 \
@@ -63,6 +72,9 @@ jobs:
             -framework UIKit \
             -framework CoreGraphics \
             -framework CoreFoundation \
+            -lSystem \
+            -lobjc \
+            -lc++ \
             -objc_abi_version 2 \
             -install_name @executable_path/JYJH_NoCDNoEnergy.dylib \
             -o JYJH_NoCDNoEnergy.dylib \
