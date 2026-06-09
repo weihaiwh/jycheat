@@ -43,7 +43,7 @@ jobs:
           echo "ldid: $LDID"
           
           # This version uses direct memory patching - NO substrate needed!
-          # Only needs Foundation framework
+          # Only needs Foundation + UIKit frameworks
           $CLANG \
             -arch arm64 \
             -miphoneos-version-min=15.0 \
@@ -51,9 +51,10 @@ jobs:
             -fobjc-arc \
             -dynamiclib \
             -framework Foundation \
+            -framework UIKit \
             -install_name @executable_path/JYJH_NoCDNoEnergy.dylib \
             -o JYJH_NoCDNoEnergy.dylib \
-            JYJH_NoCDNoEnergy.xm
+            JYJH_NoCDNoEnergy.m
 
       - name: Sign and package
         run: |
@@ -78,10 +79,9 @@ jobs:
           tag_name: v1.0.0
           files: output/*
           body: |
-            ## 剑影江湖 v1.8.1 无CD无能量技能插件
-            - ✅ 无CD + 无能量
-            - 使用内存补丁方式，不依赖Substrate
-            - 适配 iPhone 13 Pro Max / iOS 15.6 / 无根越狱
-            ⚠️ 仅适用于 v1.8.1
+            ## 剑影江湖 v8.0 无CD无能量技能插件
+            - ✅ 无CD + 无能量 + 伤害上限滑条
+            - 使用IL2CPP运行时API + MethodInfo指针替换，不依赖Substrate
+            - 适配 iOS 15+ / 无根越狱 / TrollStore
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
