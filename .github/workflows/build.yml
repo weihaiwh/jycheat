@@ -34,20 +34,27 @@ jobs:
 
       - name: Build tweak dylib
         run: |
-          export PATH="/tmp/cctools/usage_examples/ios_toolchain/target/bin:$PATH"
-          
-          # Verify tools exist
-          which arm-apple-darwin11-clang || { echo "clang not in PATH!"; ls /tmp/cctools/usage_examples/ios_toolchain/target/bin/; exit 1; }
-          which arm-apple-darwin11-ld || echo "ld not in PATH (will use -fuse-ld)"
-          
-          SDK=$(find /tmp/cctools -name "iPhoneOS*.sdk" -type d | head -1)
-          LDID=$(find /tmp/cctools -name "ldid" -type f | head -1)
+          TOOLCHAIN=/tmp/cctools/usage_examples/ios_toolchain/target
+          export PATH="$TOOLCHAIN/bin:$PATH"
+          SDK="$TOOLCHAIN/SDK/iPhoneOS15.6.sdk"
+          LD="$TOOLCHAIN/bin/arm-apple-darwin11-ld"
           
           echo "SDK: $SDK"
-          echo "ldid: $LDID"
+          echo "LD: $LD"
+          ls "$TOOLCHAIN/bin/" | head -5
           
-          # Use cctools clang with -fuse-ld= to explicitly use cctools ld
-          # This prevents clang from invoking the host /usr/bin/ld
+          # Compile .m to .o first (separate compile step, no linking)
+          arm-apple-darwin11-clang \
+            -arch arm64 \
+            -miphoneos-version-min=15.0 \
+            -isysroot "$SDK" \
+            -fobjc-arc \
+            -c JYJH_NoCDNoEnergy.m \
+            -o JYJH_NoCDNoEnergy.o
+          
+          echo "Compile OK, linking..."
+          
+          # Link with cctools ld directly (bypass clang's linker selection)
           arm-apple-darwin11-clang \
             -arch arm64 \
             -miphoneos-version-min=15.0 \
@@ -56,10 +63,10 @@ jobs:
             -dynamiclib \
             -framework Foundation \
             -framework UIKit \
-            -fuse-ld=arm-apple-darwin11-ld \
+            -Wl,-ld_classic \
             -install_name @executable_path/JYJH_NoCDNoEnergy.dylib \
             -o JYJH_NoCDNoEnergy.dylib \
-            JYJH_NoCDNoEnergy.m
+            JYJH_NoCDNoEnergy.o
 
       - name: Sign and package
         run: |
