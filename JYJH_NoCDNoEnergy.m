@@ -191,6 +191,33 @@ static void* getMethodPointer(void *methodInfo) {
     return NULL;
 }
 
+/**
+ * dumpMethodInfo - 打印MethodInfo结构的前64字节
+ * 用于调试methodPointer偏移是否正确
+ */
+static void dumpMethodInfo(const char *label, void *methodInfo) {
+    if (!methodInfo) { jlog(@"%s: NULL", label); return; }
+    
+    uint64_t *p = (uint64_t *)methodInfo;
+    jlog(@"=== dump %s MethodInfo @ %p ===", label, methodInfo);
+    for (int i = 0; i < 8; i++) {
+        jlog(@"  [%d] +0x%02X: 0x%016llX", i, i*8, (unsigned long long)p[i]);
+    }
+    
+    // 读取每个8字节作为指针, 验证是否指向可执行代码
+    for (int i = 0; i < 4; i++) {
+        void *ptr = (void *)p[i];
+        if (ptr && (uint64_t)ptr > 0x100000000ULL) {
+            vm_size_t outSize = 0; uint32_t test;
+            kern_return_t kr = vm_read_overwrite(mach_task_self(),
+                (vm_address_t)ptr, 4, (vm_address_t)&test, &outSize);
+            if (kr == KERN_SUCCESS && test != 0 && test != 0xFFFFFFFF) {
+                jlog(@"  -> offset %d (%p) looks like code: 0x%08X", i, ptr, test);
+            }
+        }
+    }
+}
+
 // ============================================================
 // 查找IL2CPP方法
 // ============================================================
@@ -367,26 +394,55 @@ static BOOL allocCodeMem(void) {
 static void applyCanUse(BOOL enable) {
     if (!g_infoCanUse) return;
     
+    // 验证: 读取MethodInfo的第一个8字节, 看当前值
+    void *currentPtr = NULL;
+    memcpy(&currentPtr, g_infoCanUse, sizeof(void*));
+    jlog(@"CanUse current methodPointer=%p (expect %s)", currentPtr, enable ? "return_true1" : "origPtr");
+    
     if (enable) {
-        // 指向return_true1代码
         kern_return_t kr = patchMem(g_infoCanUse, &g_codeReturnTrue1, sizeof(void*));
-        jlog(@"CanUse: %s (%p -> %p) kr=%d", enable ? "ON" : "OFF", g_origPtrCanUse, g_codeReturnTrue1, kr);
+        jlog(@"CanUse: ON (%p -> %p) kr=%d", g_origPtrCanUse, g_codeReturnTrue1, kr);
+        
+        // 验证写入: 读回第一个8字节
+        void *verifyPtr = NULL;
+        memcpy(&verifyPtr, g_infoCanUse, sizeof(void*));
+        jlog(@"CanUse verify: methodPointer now=%p (expect %p) match=%d",
+             verifyPtr, g_codeReturnTrue1, verifyPtr == g_codeReturnTrue1);
     } else {
-        // 恢复原始指针
         kern_return_t kr = patchMem(g_infoCanUse, &g_origPtrCanUse, sizeof(void*));
         jlog(@"CanUse: OFF (restore %p) kr=%d", g_origPtrCanUse, kr);
+        
+        // 验证恢复
+        void *verifyPtr = NULL;
+        memcpy(&verifyPtr, g_infoCanUse, sizeof(void*));
+        jlog(@"CanUse verify: methodPointer now=%p (expect %p) match=%d",
+             verifyPtr, g_origPtrCanUse, verifyPtr == g_origPtrCanUse);
     }
 }
 
 static void applyIsReady(BOOL enable) {
     if (!g_infoIsReady) return;
     
+    void *currentPtr = NULL;
+    memcpy(&currentPtr, g_infoIsReady, sizeof(void*));
+    jlog(@"IsReady current methodPointer=%p", currentPtr);
+    
     if (enable) {
         kern_return_t kr = patchMem(g_infoIsReady, &g_codeReturnTrue2, sizeof(void*));
-        jlog(@"IsReady: %s (%p -> %p) kr=%d", enable ? "ON" : "OFF", g_origPtrIsReady, g_codeReturnTrue2, kr);
+        jlog(@"IsReady: ON (%p -> %p) kr=%d", g_origPtrIsReady, g_codeReturnTrue2, kr);
+        
+        void *verifyPtr = NULL;
+        memcpy(&verifyPtr, g_infoIsReady, sizeof(void*));
+        jlog(@"IsReady verify: methodPointer now=%p (expect %p) match=%d",
+             verifyPtr, g_codeReturnTrue2, verifyPtr == g_codeReturnTrue2);
     } else {
         kern_return_t kr = patchMem(g_infoIsReady, &g_origPtrIsReady, sizeof(void*));
         jlog(@"IsReady: OFF (restore %p) kr=%d", g_origPtrIsReady, kr);
+        
+        void *verifyPtr = NULL;
+        memcpy(&verifyPtr, g_infoIsReady, sizeof(void*));
+        jlog(@"IsReady verify: methodPointer now=%p (expect %p) match=%d",
+             verifyPtr, g_origPtrIsReady, verifyPtr == g_origPtrIsReady);
     }
 }
 
@@ -397,6 +453,12 @@ static void applyLimitDmg(BOOL enable) {
         kern_return_t kr = patchMem(g_infoLimitDmg, &g_codeReturnValue, sizeof(void*));
         jlog(@"LimitDmg: ON (%p -> %p) kr=%d", g_origPtrLimitDmg, g_codeReturnValue, kr);
         g_limitDmgPatched = YES;
+        
+        // 验证
+        void *verifyPtr = NULL;
+        memcpy(&verifyPtr, g_infoLimitDmg, sizeof(void*));
+        jlog(@"LimitDmg verify: methodPointer now=%p (expect %p) match=%d",
+             verifyPtr, g_codeReturnValue, verifyPtr == g_codeReturnValue);
     } else {
         kern_return_t kr = patchMem(g_infoLimitDmg, &g_origPtrLimitDmg, sizeof(void*));
         jlog(@"LimitDmg: OFF (restore %p) kr=%d", g_origPtrLimitDmg, kr);
@@ -410,6 +472,11 @@ static void applyAllPatches(void) {
     
     // 第二步: 分配代码内存并写入替换代码 (RWX)
     if (!allocCodeMem()) return;
+    
+    // 第二步B: dump MethodInfo结构, 确认methodPointer偏移
+    dumpMethodInfo("CanUse", g_infoCanUse);
+    dumpMethodInfo("IsReady", g_infoIsReady);
+    dumpMethodInfo("LimitDmg", g_infoLimitDmg);
     
     // 第三步: 替换methodPointer
     if (g_noCD) applyCanUse(YES);
@@ -533,7 +600,7 @@ static void setupUI(void) {
     g_panel.backgroundColor=[UIColor colorWithRed:0.08 green:0.08 blue:0.12 alpha:0.98];
     g_panel.layer.cornerRadius=14; g_panel.hidden=YES; [win addSubview:g_panel];
     UILabel *title=[[UILabel alloc]initWithFrame:CGRectMake(0,10,260,24)];
-    title.text=@"\u5251\u5f71\u6c5f\u6e56 v8.2"; title.textColor=[UIColor cyanColor];
+    title.text=@"\u5251\u5f71\u6c5f\u6e56 v8.3"; title.textColor=[UIColor cyanColor];
     title.font=[UIFont boldSystemFontOfSize:15]; title.textAlignment=NSTextAlignmentCenter; [g_panel addSubview:title];
     g_btnCD=[UIButton buttonWithType:UIButtonTypeCustom]; g_btnCD.frame=CGRectMake(16,42,228,36);
     g_btnCD.layer.cornerRadius=8; [g_btnCD addTarget:[JYJHActionHandler shared] action:@selector(onCD) forControlEvents:UIControlEventTouchUpInside]; [g_panel addSubview:g_btnCD];
@@ -562,7 +629,7 @@ static void initialize(void) {
     loaded = YES;
     
     g_debugLines=[NSMutableArray new];
-    jlog(@"========== JYJH v8.2 ==========");
+    jlog(@"========== JYJH v8.3 ==========");
     jlog(@"iOS %@", [[UIDevice currentDevice] systemVersion]);
     jlog(@"Bundle %@", [[NSBundle mainBundle] bundleIdentifier]);
     
