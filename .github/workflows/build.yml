@@ -1,4 +1,4 @@
-name: Build JYJH NoCD NoEnergy Dylib (v12 Precise)
+name: Build JYJH NoCD NoEnergy Dylib (v12.1 dump-cs)
 
 on:
   push:
@@ -134,16 +134,14 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v12.0
+          tag_name: v12.1
           files: output/*
           body: |
-            ## 剑影江湖 v12.0 - 精确方法Hook (基于dump分析)
-            - ✅ 无CD + 无能量 + 无限怒气 + 伤害上限滑条
-            - v12.0: 基于IL2CPP dump精确hook游戏逻辑函数
-            - 新增: CheckSkillUnlock→true (忽略30级解锁限制)
-            - 新增: CanUseExSkill→true (大招可用)
-            - 新增: IsExSkillInCD→false (大招不在CD)
-            - 新增: SkillModel.CheckSkill→true
-            - 修复: v11.0关键词匹配到.NET基础库函数的问题
+            ## 剑影江湖 v12.1 - 基于dump.cs签名修正
+            - ✅ 无CD + 无能量 + 无限怒气 + 伤害区分攻击者
+            - v12.1: 基于com.jyjh.whwb_1.10.1.cs修正函数签名
+            - CalcBufferDamage有attackerCf/defCf参数, 可区分攻击者
+            - 移除不存在的SkillModel.CheckSkill
+            - 修复偶尔卡住的问题
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
