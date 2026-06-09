@@ -34,24 +34,21 @@ jobs:
 
       - name: Build tweak dylib
         run: |
-          # cctools clang is at target/bin/ with arm-apple-darwin11- prefix
-          CLANG=$(find /tmp/cctools/usage_examples/ios_toolchain/target/bin -name "*clang*" -type f ! -name "*.la" | head -1)
+          export PATH="/tmp/cctools/usage_examples/ios_toolchain/target/bin:$PATH"
+          
+          # Verify tools exist
+          which arm-apple-darwin11-clang || { echo "clang not in PATH!"; ls /tmp/cctools/usage_examples/ios_toolchain/target/bin/; exit 1; }
+          which arm-apple-darwin11-ld || echo "ld not in PATH (will use -fuse-ld)"
+          
           SDK=$(find /tmp/cctools -name "iPhoneOS*.sdk" -type d | head -1)
           LDID=$(find /tmp/cctools -name "ldid" -type f | head -1)
-          # Use cctools ld (not host ld) - has arm-apple-darwin11- prefix
-          LD=$(find /tmp/cctools/usage_examples/ios_toolchain/target/bin -name "*ld" -type f ! -name "ldid" ! -name "*.la" | head -1)
           
-          echo "clang: $CLANG"
           echo "SDK: $SDK"
           echo "ldid: $LDID"
-          echo "ld: $LD"
           
-          if [ -z "$CLANG" ]; then echo "ERROR: clang not found!"; ls /tmp/cctools/usage_examples/ios_toolchain/target/bin/; exit 1; fi
-          
-          # This version uses direct memory patching - NO substrate needed!
-          # Only needs Foundation + UIKit frameworks
-          # -mlinker-version=609 forces cctools ld instead of LLD
-          $CLANG \
+          # Use cctools clang with -fuse-ld= to explicitly use cctools ld
+          # This prevents clang from invoking the host /usr/bin/ld
+          arm-apple-darwin11-clang \
             -arch arm64 \
             -miphoneos-version-min=15.0 \
             -isysroot "$SDK" \
@@ -59,7 +56,7 @@ jobs:
             -dynamiclib \
             -framework Foundation \
             -framework UIKit \
-            -mlinker-version=609 \
+            -fuse-ld=arm-apple-darwin11-ld \
             -install_name @executable_path/JYJH_NoCDNoEnergy.dylib \
             -o JYJH_NoCDNoEnergy.dylib \
             JYJH_NoCDNoEnergy.m
@@ -84,7 +81,7 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.0
+          tag_name: v8.0
           files: output/*
           body: |
             ## 剑影江湖 v8.0 无CD无能量技能插件
