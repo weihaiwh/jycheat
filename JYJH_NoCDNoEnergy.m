@@ -279,11 +279,12 @@ static void makeReturnValue(uint32_t *buf, int value) {
 static void patchCanUse(BOOL enable) {
     if (!g_funcCanUse) { jlog(@"CanUse: funcAddr not found"); return; }
     
-    if (enable) {
-        // 保存原始指令 (8字节就够了, 我们只覆盖2条指令)
-        g_origCanUseLen = 8;
+    if (enable && !g_cdPatched) {
+        // 保存原始指令 (16字节, 覆盖前4条指令确保安全)
+        g_origCanUseLen = 16;
         memcpy(g_origCanUse, g_funcCanUse, g_origCanUseLen);
-        jlog(@"CanUse orig bytes: %08X %08X", g_origCanUse[0], g_origCanUse[1]);
+        jlog(@"CanUse orig bytes: %08X %08X %08X %08X", 
+             g_origCanUse[0], g_origCanUse[1], g_origCanUse[2], g_origCanUse[3]);
         
         // 直接在函数地址写 MOV W0,#1; RET
         kern_return_t kr = patchCode(g_funcCanUse, CODE_RETURN_TRUE, 8);
@@ -291,30 +292,25 @@ static void patchCanUse(BOOL enable) {
         
         if (kr == KERN_SUCCESS) {
             g_cdPatched = YES;
-            // 验证
             uint32_t *v = (uint32_t *)g_funcCanUse;
-            jlog(@"CanUse verify: %08X %08X (expect 52800020 D65F03C0)", v[0], v[1]);
+            jlog(@"CanUse verify: %08X %08X", v[0], v[1]);
         }
-    } else {
+    } else if (!enable && g_cdPatched) {
         // 恢复原始指令
-        if (!g_cdPatched) { jlog(@"CanUse: not patched, skip restore"); return; }
         kern_return_t kr = patchCode(g_funcCanUse, g_origCanUse, g_origCanUseLen);
         jlog(@"CanUse: restored %p kr=%d", g_funcCanUse, kr);
         g_cdPatched = NO;
-        
-        // 验证
-        uint32_t *v = (uint32_t *)g_funcCanUse;
-        jlog(@"CanUse verify: %08X %08X (expect %08X %08X)", v[0], v[1], g_origCanUse[0], g_origCanUse[1]);
     }
 }
 
 static void patchIsReady(BOOL enable) {
     if (!g_funcIsReady) { jlog(@"IsReady: funcAddr not found"); return; }
     
-    if (enable) {
-        g_origIsReadyLen = 8;
+    if (enable && !g_energyPatched) {
+        g_origIsReadyLen = 16;
         memcpy(g_origIsReady, g_funcIsReady, g_origIsReadyLen);
-        jlog(@"IsReady orig bytes: %08X %08X", g_origIsReady[0], g_origIsReady[1]);
+        jlog(@"IsReady orig bytes: %08X %08X %08X %08X",
+             g_origIsReady[0], g_origIsReady[1], g_origIsReady[2], g_origIsReady[3]);
         
         kern_return_t kr = patchCode(g_funcIsReady, CODE_RETURN_TRUE, 8);
         jlog(@"IsReady: patched %p (return true) kr=%d", g_funcIsReady, kr);
@@ -324,8 +320,7 @@ static void patchIsReady(BOOL enable) {
             uint32_t *v = (uint32_t *)g_funcIsReady;
             jlog(@"IsReady verify: %08X %08X", v[0], v[1]);
         }
-    } else {
-        if (!g_energyPatched) { jlog(@"IsReady: not patched, skip restore"); return; }
+    } else if (!enable && g_energyPatched) {
         kern_return_t kr = patchCode(g_funcIsReady, g_origIsReady, g_origIsReadyLen);
         jlog(@"IsReady: restored %p kr=%d", g_funcIsReady, kr);
         g_energyPatched = NO;
@@ -335,27 +330,22 @@ static void patchIsReady(BOOL enable) {
 static void patchLimitDmgValue(int value) {
     if (!g_funcLimitDmg) { jlog(@"LimitDmg: funcAddr not found"); return; }
     
-    // 第一次patch: 保存原始指令并写入return value
     if (!g_limitPatched) {
-        // 保存原始指令 (12字节, 因为return_value最多3条指令)
-        g_origLimitDmgLen = 12;
+        g_origLimitDmgLen = 16;
         memcpy(g_origLimitDmg, g_funcLimitDmg, g_origLimitDmgLen);
-        jlog(@"LimitDmg orig bytes: %08X %08X %08X", g_origLimitDmg[0], g_origLimitDmg[1], g_origLimitDmg[2]);
+        jlog(@"LimitDmg orig bytes: %08X %08X %08X %08X",
+             g_origLimitDmg[0], g_origLimitDmg[1], g_origLimitDmg[2], g_origLimitDmg[3]);
     }
     
-    // 生成return value代码
-    uint32_t code[4];
+    uint32_t code[4] = {0};
     makeReturnValue(code, value);
-    int codeLen = (value > 0xFFFF) ? 12 : 8;  // MOVZ+MOVK+RET=12, MOVZ+RET=8
+    int codeLen = (value > 0xFFFF) ? 12 : 8;
     
-    // 直接在函数地址写入
     kern_return_t kr = patchCode(g_funcLimitDmg, code, codeLen);
     jlog(@"LimitDmg: patched %p (return %d) kr=%d len=%d", g_funcLimitDmg, value, kr, codeLen);
     
     if (kr == KERN_SUCCESS) {
         g_limitPatched = YES;
-        uint32_t *v = (uint32_t *)g_funcLimitDmg;
-        jlog(@"LimitDmg verify: %08X %08X %08X", v[0], v[1], v[2]);
     }
 }
 
@@ -473,7 +463,7 @@ static void setupUI(void) {
     g_panel.backgroundColor=[UIColor colorWithRed:0.08 green:0.08 blue:0.12 alpha:0.98];
     g_panel.layer.cornerRadius=14; g_panel.hidden=YES; [win addSubview:g_panel];
     UILabel *title=[[UILabel alloc]initWithFrame:CGRectMake(0,10,260,24)];
-    title.text=@"\u5251\u5f71\u6c5f\u6e56 v9.0"; title.textColor=[UIColor cyanColor];
+    title.text=@"\u5251\u5f71\u6c5f\u6e56 v9.1"; title.textColor=[UIColor cyanColor];
     title.font=[UIFont boldSystemFontOfSize:15]; title.textAlignment=NSTextAlignmentCenter; [g_panel addSubview:title];
     g_btnCD=[UIButton buttonWithType:UIButtonTypeCustom]; g_btnCD.frame=CGRectMake(16,42,228,36);
     g_btnCD.layer.cornerRadius=8; [g_btnCD addTarget:[JYJHActionHandler shared] action:@selector(onCD) forControlEvents:UIControlEventTouchUpInside]; [g_panel addSubview:g_btnCD];
@@ -502,14 +492,15 @@ static void initialize(void) {
     loaded = YES;
     
     g_debugLines=[NSMutableArray new];
-    jlog(@"========== JYJH v9.0 ==========");
+    jlog(@"========== JYJH v9.1 ==========");
     jlog(@"iOS %@", [[UIDevice currentDevice] systemVersion]);
     jlog(@"Bundle %@", [[NSBundle mainBundle] bundleIdentifier]);
     jlog(@"Strategy: 直接修改游戏函数机器码 (和libtool一样)");
     
-    // 延迟5秒, 等IL2CPP运行时初始化完成
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(5.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
-        jlog(@"5s delay done, applying patches...");
+    // 延迟8秒, 等IL2CPP运行时初始化完成 AND 游戏场景加载完成
+    // 5秒时游戏可能还在loading, 此时修改代码会导致加载流程crash
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(8.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+        jlog(@"8s delay done, applying patches...");
         applyAllPatches();
         setupUI();
     });

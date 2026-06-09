@@ -100,13 +100,12 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v9.0
+          tag_name: v9.1
           files: output/*
           body: |
-            ## 剑影江湖 v9.0 无CD无能量技能插件
+            ## 剑影江湖 v9.1 无CD无能量技能插件
             - ✅ 无CD + 无能量 + 伤害上限滑条
-            - v9.0: 根本性策略改变 - 直接修改游戏函数机器码 (和libtool一样)
-            - 替换MethodInfo.methodPointer无效 → 改为直接在原始函数地址写代码
-            - 这就是libtool注入时"卡顿"的原因: vm_protect修改代码页权限
+            - v9.1: 修复进游戏后闪退 - 延迟8秒等场景加载完再patch
+            - 防止重复patch, toggle加状态检查
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
