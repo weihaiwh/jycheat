@@ -4,6 +4,9 @@
  * 
  * Dobby is a lightweight, multi-platform, multi-architecture hook framework.
  * Used by libtool (LIBTOOL) for inline hooking on iOS.
+ * 
+ * Note: We only use DobbyHook. Toggle is done via global variables
+ * in the hook callback functions - no need for DobbyDestroyHook.
  */
 
 #ifndef DOBBY_H
@@ -21,20 +24,6 @@ extern "C" {
 // origin_func:  输出参数, 保存原始函数的trampoline指针 (调用它等于调用原函数)
 // 返回值: 0=成功, 非0=失败
 int DobbyHook(void *target_func, void *replace_func, void **origin_func);
-
-// DobbyDestroyHook - 移除hook, 恢复原始函数
-// target_func: 之前被hook的目标函数地址
-// 返回值: 0=成功, 非0=失败  
-int DobbyDestroyHook(void *target_func);
-
-// DobbyInstrument - 插桩hook (每次调用都触发回调)
-// target_func: 目标函数地址
-// pre_handler: 调用前的回调
-// post_handler: 调用后的回调
-int DobbyInstrument(void *target_func, void *pre_handler, void *post_handler);
-
-// DobbyDestroyInstrument - 移除插桩
-int DobbyDestroyInstrument(void *target_func);
 
 #ifdef __cplusplus
 }

@@ -19,7 +19,12 @@
  *     DobbyHook(target_func, replace_func, &orig_func)
  *     → target_func开头被替换为跳转到replace_func
  *     → orig_func指向trampoline, 调用orig_func等于调用原函数
- *     → DobbyDestroyHook(target_func) 恢复原始函数
+ *
+ *   Toggle策略: 不使用DobbyDestroyHook(可能不在编译的libdobby.a中)
+ *     替代函数通过全局变量控制行为:
+ *     - g_noCD=YES → hookCanUse返回true
+ *     - g_noCD=NO  → hookCanUse调用原函数(trampoline)
+ *     这比频繁hook/unhook更安全, 也避免了竞态条件
  */
 
 #import <mach-o/dyld.h>
@@ -110,8 +115,13 @@ static BOOL g_panelOpen = NO;
  * 原函数: bool CheckSkillAttackCanUse(CharacterFiled* this, int skillId, int arg2, int arg3)
  */
 static BOOL hookCanUse(void *self, int a1, int a2, int a3) {
-    // 直接返回true, 无需调用原函数
-    return YES;
+    // v10关键: 检查全局变量决定是否生效
+    // g_noCD=YES → 返回true (无CD)
+    // g_noCD=NO → 调用原函数 (正常行为)
+    // 不需要DobbyDestroyHook! toggle只改全局变量!
+    if (g_noCD) return YES;
+    if (g_origCanUse) return g_origCanUse(self, a1, a2, a3);
+    return YES;  // fallback
 }
 
 /**
@@ -119,6 +129,8 @@ static BOOL hookCanUse(void *self, int a1, int a2, int a3) {
  * 原函数: bool CheckSkillIsReady(CharacterFiled* this, int skillId, int arg2, int arg3)
  */
 static BOOL hookIsReady(void *self, int a1, int a2, int a3) {
+    if (g_noEnergy) return YES;
+    if (g_origIsReady) return g_origIsReady(self, a1, a2, a3);
     return YES;
 }
 
@@ -130,6 +142,8 @@ static BOOL hookIsReady(void *self, int a1, int a2, int a3) {
  * 这样slider变化时不需要重新hook/patch, 值自动更新!
  */
 static int hookLimitDmg(void *self) {
+    // v10关键: hook始终生效, 但返回值跟随g_damageLimit
+    // 不需要DobbyDestroyHook! slider只改全局变量!
     return g_damageLimit;
 }
 
@@ -244,7 +258,8 @@ static void findIL2CPP(void) {
 static void hookCanUseFunc(BOOL enable) {
     if (!g_funcCanUse) { jlog(@"CanUse: funcAddr not found"); return; }
     
-    if (enable && !g_cdHooked) {
+    if (!g_cdHooked) {
+        // DobbyHook: 只需hook一次, toggle通过全局变量控制
         int ret = DobbyHook(g_funcCanUse, hookCanUse, (void **)&g_origCanUse);
         if (ret == 0) {
             g_cdHooked = YES;
@@ -252,22 +267,15 @@ static void hookCanUseFunc(BOOL enable) {
         } else {
             jlog(@"CanUse: DobbyHook FAILED ret=%d addr=%p", ret, g_funcCanUse);
         }
-    } else if (!enable && g_cdHooked) {
-        int ret = DobbyDestroyHook(g_funcCanUse);
-        if (ret == 0) {
-            g_cdHooked = NO;
-            g_origCanUse = NULL;
-            jlog(@"CanUse: DobbyDestroyHook OK, restored");
-        } else {
-            jlog(@"CanUse: DobbyDestroyHook FAILED ret=%d", ret);
-        }
     }
+    // toggle只需改全局变量g_noCD, hook函数会自动判断
+    jlog(@"CanUse: g_noCD=%d (toggle via global var, no unhook needed)", g_noCD);
 }
 
 static void hookIsReadyFunc(BOOL enable) {
     if (!g_funcIsReady) { jlog(@"IsReady: funcAddr not found"); return; }
     
-    if (enable && !g_energyHooked) {
+    if (!g_energyHooked) {
         int ret = DobbyHook(g_funcIsReady, hookIsReady, (void **)&g_origIsReady);
         if (ret == 0) {
             g_energyHooked = YES;
@@ -275,22 +283,14 @@ static void hookIsReadyFunc(BOOL enable) {
         } else {
             jlog(@"IsReady: DobbyHook FAILED ret=%d addr=%p", ret, g_funcIsReady);
         }
-    } else if (!enable && g_energyHooked) {
-        int ret = DobbyDestroyHook(g_funcIsReady);
-        if (ret == 0) {
-            g_energyHooked = NO;
-            g_origIsReady = NULL;
-            jlog(@"IsReady: DobbyDestroyHook OK, restored");
-        } else {
-            jlog(@"IsReady: DobbyDestroyHook FAILED ret=%d", ret);
-        }
     }
+    jlog(@"IsReady: g_noEnergy=%d (toggle via global var, no unhook needed)", g_noEnergy);
 }
 
 static void hookLimitDmgFunc(BOOL enable) {
     if (!g_funcLimitDmg) { jlog(@"LimitDmg: funcAddr not found"); return; }
     
-    if (enable && !g_limitHooked) {
+    if (!g_limitHooked) {
         int ret = DobbyHook(g_funcLimitDmg, hookLimitDmg, (void **)&g_origLimitDmg);
         if (ret == 0) {
             g_limitHooked = YES;
@@ -298,16 +298,8 @@ static void hookLimitDmgFunc(BOOL enable) {
         } else {
             jlog(@"LimitDmg: DobbyHook FAILED ret=%d addr=%p", ret, g_funcLimitDmg);
         }
-    } else if (!enable && g_limitHooked) {
-        int ret = DobbyDestroyHook(g_funcLimitDmg);
-        if (ret == 0) {
-            g_limitHooked = NO;
-            g_origLimitDmg = NULL;
-            jlog(@"LimitDmg: DobbyDestroyHook OK, restored");
-        } else {
-            jlog(@"LimitDmg: DobbyDestroyHook FAILED ret=%d", ret);
-        }
     }
+    jlog(@"LimitDmg: g_damageLimit=%d (auto-follows slider, no unhook needed)", g_damageLimit);
 }
 
 static void applyAllHooks(void) {
