@@ -1,4 +1,4 @@
-name: Build JYJH NoCD NoEnergy Dylib
+name: Build JYJH NoCD NoEnergy Dylib (v10 Dobby)
 
 on:
   push:
@@ -32,36 +32,68 @@ jobs:
           cd /tmp/cctools/usage_examples/ios_toolchain
           ./build.sh /tmp/iPhoneOS15.6.sdk.tar.xz arm64
 
-      - name: Build tweak dylib
+      - name: Build Dobby static library for iOS ARM64
         run: |
           TOOLCHAIN=/tmp/cctools/usage_examples/ios_toolchain/target
           export PATH="$TOOLCHAIN/bin:$PATH"
           SDK="$TOOLCHAIN/SDK/iPhoneOS15.6.sdk"
           
+          # Clone Dobby source
+          git clone https://github.com/jmpews/Dobby.git --depth 1 /tmp/dobby
+          
+          # Create toolchain file for cmake cross-compilation
+          cat > /tmp/ios-toolchain.cmake << 'EOF'
+          set(CMAKE_SYSTEM_NAME Darwin)
+          set(CMAKE_SYSTEM_PROCESSOR arm64)
+          set(CMAKE_C_COMPILER arm-apple-darwin11-clang)
+          set(CMAKE_CXX_COMPILER arm-apple-darwin11-clang++)
+          set(CMAKE_FIND_ROOT_PATH MODE_PROGRAM NEVER)
+          set(CMAKE_FIND_ROOT_PATH MODE_LIBRARY ONLY)
+          set(CMAKE_FIND_ROOT_PATH MODE_INCLUDE ONLY)
+          EOF
+          
+          # Build Dobby as static library
+          mkdir -p /tmp/dobby/build && cd /tmp/dobby/build
+          cmake .. \
+            -DCMAKE_TOOLCHAIN_FILE=/tmp/ios-toolchain.cmake \
+            -DCMAKE_C_FLAGS="-arch arm64 -miphoneos-version-min=15.0 -isysroot $SDK" \
+            -DCMAKE_CXX_FLAGS="-arch arm64 -miphoneos-version-min=15.0 -isysroot $SDK" \
+            -DDOBBY_DEBUG=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -G Ninja
+          
+          ninja -j$(nproc)
+          
+          # Verify the static library was built
+          find /tmp/dobby/build -name "*.a" -ls
+          echo "DOBBY_LIB=$(find /tmp/dobby/build -name 'libdobby.a' | head -1)" >> $GITHUB_ENV
+
+      - name: Build tweak dylib
+        run: |
+          TOOLCHAIN=/tmp/cctools/usage_examples/ios_toolchain/target
+          export PATH="$TOOLCHAIN/bin:$PATH"
+          SDK="$TOOLCHAIN/SDK/iPhoneOS15.6.sdk"
+          DOBBY_LIB="${DOBBY_LIB:-/tmp/dobby/build/libdobby.a}"
+          
           echo "SDK: $SDK"
+          echo "DOBBY_LIB: $DOBBY_LIB"
           
-          # Verify system libraries exist in SDK
-          echo "=== Checking system libraries ==="
-          ls -la "$SDK/usr/lib/libSystem.dylib" 2>/dev/null || echo "libSystem.dylib NOT FOUND"
-          ls -la "$SDK/usr/lib/libobjc.dylib" 2>/dev/null || echo "libobjc.dylib NOT FOUND"
-          ls "$SDK/usr/lib/" | head -30
+          # Verify files exist
+          ls -la "$DOBBY_LIB" || { echo "Dobby lib not found!"; exit 1; }
           
-          # Compile .m -> .o
+          # Compile .m -> .o (include dobby.h from project root)
           arm-apple-darwin11-clang \
             -arch arm64 \
             -miphoneos-version-min=15.0 \
             -isysroot "$SDK" \
             -fobjc-arc \
+            -I. \
             -c JYJH_NoCDNoEnergy.m \
             -o JYJH_NoCDNoEnergy.o
           
-          echo "Compile OK, linking..."
+          echo "Compile OK, linking with Dobby..."
           
-          # Link with cctools ld directly (bypass clang which invokes wrong host ld)
-          # Must explicitly add system libraries that Apple ld auto-links:
-          #   -lSystem (libc, libdispatch, libdyld, libmacho, etc.)
-          #   -lobjc (Objective-C runtime, blocks runtime)
-          #   -lc++ (C++ standard library, needed by Foundation)
+          # Link with cctools ld + Dobby static library
           arm-apple-darwin11-ld \
             -arch arm64 \
             -iphoneos_version_min 15.0 \
@@ -78,7 +110,8 @@ jobs:
             -objc_abi_version 2 \
             -install_name @executable_path/JYJH_NoCDNoEnergy.dylib \
             -o JYJH_NoCDNoEnergy.dylib \
-            JYJH_NoCDNoEnergy.o
+            JYJH_NoCDNoEnergy.o \
+            "$DOBBY_LIB"
 
       - name: Sign and package
         run: |
@@ -100,12 +133,14 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v9.2
+          tag_name: v10.0
           files: output/*
           body: |
-            ## 剑影江湖 v9.2 无CD无能量技能插件
+            ## 剑影江湖 v10.0 - 使用Dobby框架 (和libtool一样!)
             - ✅ 无CD + 无能量 + 伤害上限滑条
-            - v9.2: 修复重复patch bug + 更详细的地址和字节日志
-            - 打印函数地址方便用libtool对比验证
+            - v10.0: 使用Dobby框架做inline hook, 和libtool使用相同的底层机制
+            - 修复了v9.x直接vm_protect修改代码页导致的闪退问题
+            - Dobby正确处理: 指令重定位、代码页权限、线程安全、缓存刷新
+            - slider变化不再需要重新patch, 伤害值自动跟随
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

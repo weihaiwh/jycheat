@@ -1,30 +1,25 @@
 /**
- * 剑影江湖 v9.0 - 直接修改游戏函数机器码 (和libtool一样的策略)
+ * 剑影江湖 v10.0 - 使用Dobby框架做inline hook (和libtool一样!)
  * 
- * v8.3→v9.0 策略根本性改变:
- * 
- * v8.x的方法: 替换MethodInfo.methodPointer → 闪退修好了, 但功能完全无效!
- *   原因: IL2CPP虚拟方法调用不走MethodInfo.methodPointer
- *         游戏通过vtable直接调用原始函数地址, 指针替换只是改了元数据
- *         元数据改了但实际执行路径不变 → 没有任何效果
+ * v9.2的问题: 直接vm_protect+memcpy修改代码页 → 进入战斗闪退
+ *   原因: iOS 15上vm_protect(RWX)可能不能真正修改代码页
+ *         没有指令重定位, 破坏函数prologue可能引发问题
+ *         不是线程安全的
  *
- * v9.0的方法: 直接在原始函数地址上写入新代码 (和libtool一样)
- *   这就是libtool注入时"卡顿一下"的原因 — 它在修改游戏代码页的权限
- *   任何调用这个函数的路径(无论vtable、direct call、delegate)都会执行新代码
- *   这才是真正有效的patch方式!
+ * v10.0的方案: 使用Dobby框架做inline hook (和libtool一样!)
+ *   libtool内部用的就是Dobby! (DobbyHook, dobby_set_near_trampoline)
+ *   Dobby正确处理了:
+ *     - vm_protect代码页权限修改
+ *     - ARM64指令重定位(relocate)到trampoline
+ *     - 多线程安全(暂停其他线程)
+ *     - CPU缓存刷新(sys_icache_invalidate)
+ *     - 代码签名绕过
  *
- * 具体做法:
- *   1. IL2CPP API找到MethodInfo → 读取methodPointer → 得到原始函数地址
- *   2. vm_protect把原始函数代码页设为RWX
- *   3. 直接在原始函数地址写入: MOV W0, #1; RET (return true)
- *   4. 保存原始指令用于恢复
- *   5. toggle OFF时恢复原始指令
- *
- * 优势:
- *   - 和libtool完全相同的机制, 经过实战验证有效
- *   - 不需要vm_allocate新代码页
- *   - 不需要MethodInfo指针替换
- *   - 所有调用路径都会走新代码
+ *   用法:
+ *     DobbyHook(target_func, replace_func, &orig_func)
+ *     → target_func开头被替换为跳转到replace_func
+ *     → orig_func指向trampoline, 调用orig_func等于调用原函数
+ *     → DobbyDestroyHook(target_func) 恢复原始函数
  */
 
 #import <mach-o/dyld.h>
@@ -35,7 +30,8 @@
 #import <string.h>
 #import <dlfcn.h>
 
-extern void sys_icache_invalidate(void *start, size_t len);
+// Dobby框架头文件
+#include "dobby.h"
 
 // ============================================================
 // 日志系统
@@ -67,30 +63,33 @@ static BOOL g_noCD = YES;
 static BOOL g_noEnergy = YES;
 static int g_damageLimit = 10000;
 
-// IL2CPP MethodInfo指针 (用于读取methodPointer获得函数地址)
+// IL2CPP MethodInfo指针
 static void *g_infoCanUse = NULL;
 static void *g_infoIsReady = NULL;
 static void *g_infoLimitDmg = NULL;
 
-// 原始函数的机器码地址 (从MethodInfo.methodPointer读出)
-static void *g_funcCanUse = NULL;     // CheckSkillAttackCanUse 的机器码地址
-static void *g_funcIsReady = NULL;    // CheckSkillIsReady 的机器码地址
-static void *g_funcLimitDmg = NULL;   // get_limitDamage 的机器码地址
+// 原始函数地址 (从MethodInfo.methodPointer读出)
+static void *g_funcCanUse = NULL;
+static void *g_funcIsReady = NULL;
+static void *g_funcLimitDmg = NULL;
 
-// 原始函数的前N条指令 (保存用于恢复)
-// CheckSkillAttackCanUse / CheckSkillIsReady: 只需覆盖前2条指令 (8字节: MOV W0,#1; RET)
-// get_limitDamage: 需要覆盖前2-3条指令 (8-12字节: MOVZ W0,#val; RET)
-static uint32_t g_origCanUse[4];      // 保存16字节 (足够覆盖)
-static uint32_t g_origIsReady[4];
-static uint32_t g_origLimitDmg[4];
-static int g_origCanUseLen = 0;       // 保存了多少字节
-static int g_origIsReadyLen = 0;
-static int g_origLimitDmgLen = 0;
+// Dobby hook后的原始函数指针 (调用trampoline)
+// CheckSkillAttackCanUse: 原始签名 bool(CharacterFiled*, int, int, int)
+typedef BOOL (*CanUseFuncType)(void *self, int a1, int a2, int a3);
+static CanUseFuncType g_origCanUse = NULL;
 
-// 补丁状态
-static BOOL g_cdPatched = NO;
-static BOOL g_energyPatched = NO;
-static BOOL g_limitPatched = NO;
+// CheckSkillIsReady: 原始签名 bool(CharacterFiled*, int, int, int)
+typedef BOOL (*IsReadyFuncType)(void *self, int a1, int a2, int a3);
+static IsReadyFuncType g_origIsReady = NULL;
+
+// get_limitDamage: 原始签名 int(RuntimeConfig*)
+typedef int (*LimitDmgFuncType)(void *self);
+static LimitDmgFuncType g_origLimitDmg = NULL;
+
+// Hook状态
+static BOOL g_cdHooked = NO;
+static BOOL g_energyHooked = NO;
+static BOOL g_limitHooked = NO;
 
 // UI
 static UIView *g_panel = nil;
@@ -101,53 +100,37 @@ static UILabel *g_sliderLabel = nil;
 static BOOL g_panelOpen = NO;
 
 // ============================================================
-// 代码页修改工具 (和libtool一样的策略)
+// 替代函数 (Dobby hook的目标函数)
 // ============================================================
 
 /**
- * patchCode - 在游戏函数的原始地址上直接写入新指令
+ * 替代 CheckSkillAttackCanUse -> 永远返回true (无CD)
  * 
- * 这就是libtool的做法:
- * 1. 找到函数所在的代码页
- * 2. vm_protect设为RWX (这就是注入时"卡顿一下"的原因)
- * 3. 直接在函数地址上写新指令
- * 4. sys_icache_invalidate刷新CPU缓存
- * 
- * 所有调用这个函数的路径都会执行新代码, 因为代码本身被改了
+ * 保持和原函数相同的签名, 这样调用者不会因为栈/寄存器状态异常而崩溃
+ * 原函数: bool CheckSkillAttackCanUse(CharacterFiled* this, int skillId, int arg2, int arg3)
  */
-static kern_return_t patchCode(void *funcAddr, const uint32_t *newCode, int codeLen) {
-    if (!funcAddr) return KERN_INVALID_ADDRESS;
-    
-    vm_address_t pg = (vm_address_t)funcAddr & ~(vm_page_size - 1);
-    
-    // 把代码页设为RWX - 这就是libtool注入时卡顿的原因
-    // 需要修改整个页的权限, 因为ARM64页最小16384字节
-    kern_return_t kr = vm_protect(mach_task_self(), pg, vm_page_size, 0,
-                                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
-    if (kr != KERN_SUCCESS) {
-        jlog(@"patchCode vm_protect RWX FAIL addr=%p kr=%d", funcAddr, kr);
-        // 尝试 VM_PROT_ALL (包含VM_PROT_COPY)
-        kr = vm_protect(mach_task_self(), pg, vm_page_size, 0, VM_PROT_ALL);
-        if (kr != KERN_SUCCESS) {
-            jlog(@"patchCode vm_protect ALL FAIL kr=%d", kr);
-            return kr;
-        }
-    }
-    
-    // 直接写入新指令
-    memcpy(funcAddr, newCode, codeLen);
-    
-    // 刷新CPU指令缓存 (ARM64必须, 否则CPU可能还执行旧指令)
-    sys_icache_invalidate(funcAddr, codeLen);
-    
-    // 验证写入
-    if (memcmp(funcAddr, newCode, codeLen) == 0) {
-        jlog(@"patchCode OK: wrote %d bytes to %p", codeLen, funcAddr);
-        return KERN_SUCCESS;
-    }
-    
-    jlog(@"patchCode verify FAIL addr=%p", funcAddr);
-    return KERN_FAILURE;
+static BOOL hookCanUse(void *self, int a1, int a2, int a3) {
+    // 直接返回true, 无需调用原函数
+    return YES;
+}
+
+/**
+ * 替代 CheckSkillIsReady -> 永远返回true (无能量限制)
+ * 原函数: bool CheckSkillIsReady(CharacterFiled* this, int skillId, int arg2, int arg3)
+ */
+static BOOL hookIsReady(void *self, int a1, int a2, int a3) {
+    return YES;
+}
+
+/**
+ * 替代 get_limitDamage -> 返回设定的伤害上限
+ * 原函数: int get_limitDamage(RuntimeConfig* this)
+ * 
+ * v10关键优化: hook函数读取g_damageLimit全局变量
+ * 这样slider变化时不需要重新hook/patch, 值自动更新!
+ */
+static int hookLimitDmg(void *self) {
+    return g_damageLimit;
 }
 
 // ============================================================
@@ -169,7 +152,7 @@ typedef const char* (*Il2CppClassGetName)(void*);
 // ============================================================
 
 static void findIL2CPP(void) {
-    jlog(@"=== v9.0 IL2CPP Runtime Search ===");
+    jlog(@"=== v10.0 IL2CPP Runtime Search ===");
     
     void *h = dlopen(NULL, RTLD_LAZY);
     if (!h) { jlog(@"dlopen FAIL"); return; }
@@ -225,7 +208,6 @@ static void findIL2CPP(void) {
                     uint32_t pc = param_count ? param_count(m) : 0;
                     jlog(@"FOUND CheckSkillAttackCanUse class=%s params=%u", cn ?: "?", pc);
                     g_infoCanUse = m;
-                    // 直接从MethodInfo读methodPointer → 得到游戏函数的真实地址
                     memcpy(&g_funcCanUse, m, sizeof(void*));
                     jlog(@"  funcAddr=%p", g_funcCanUse);
                     found++;
@@ -256,125 +238,86 @@ static void findIL2CPP(void) {
 }
 
 // ============================================================
-// ARM64代码生成
+// Dobby Hook 操作
 // ============================================================
 
-// return true: MOV W0, #1; RET (8字节)
-static const uint32_t CODE_RETURN_TRUE[2] = { 0x52800020, 0xD65F03C0 };
-
-// return value: MOVZ W0, #val; [MOVK]; RET (8-12字节)
-static void makeReturnValue(uint32_t *buf, int value) {
-    uint32_t low = value & 0xFFFF;
-    uint32_t high = (value >> 16) & 0xFFFF;
-    int i = 0;
-    buf[i++] = 0x52800000 | (low << 5);
-    if (high) buf[i++] = 0x72A00000 | (high << 5);
-    buf[i++] = 0xD65F03C0;  // RET
-}
-
-// ============================================================
-// 应用补丁 - 直接修改游戏函数的机器码
-// ============================================================
-
-static void patchCanUse(BOOL enable) {
+static void hookCanUseFunc(BOOL enable) {
     if (!g_funcCanUse) { jlog(@"CanUse: funcAddr not found"); return; }
     
-    if (enable && !g_cdPatched) {
-        // 先读当前函数前4条指令 (用于对比)
-        uint32_t *cur = (uint32_t *)g_funcCanUse;
-        jlog(@"CanUse current bytes: %08X %08X %08X %08X", cur[0], cur[1], cur[2], cur[3]);
-        
-        // 保存原始指令 (16字节)
-        g_origCanUseLen = 16;
-        memcpy(g_origCanUse, g_funcCanUse, g_origCanUseLen);
-        jlog(@"CanUse saved orig: %08X %08X %08X %08X", 
-             g_origCanUse[0], g_origCanUse[1], g_origCanUse[2], g_origCanUse[3]);
-        
-        // 直接在函数地址写 MOV W0,#1; RET
-        kern_return_t kr = patchCode(g_funcCanUse, CODE_RETURN_TRUE, 8);
-        jlog(@"CanUse: patched %p (return true) kr=%d", g_funcCanUse, kr);
-        
-        if (kr == KERN_SUCCESS) {
-            g_cdPatched = YES;
-            uint32_t *v = (uint32_t *)g_funcCanUse;
-            jlog(@"CanUse verify: %08X %08X", v[0], v[1]);
+    if (enable && !g_cdHooked) {
+        int ret = DobbyHook(g_funcCanUse, hookCanUse, (void **)&g_origCanUse);
+        if (ret == 0) {
+            g_cdHooked = YES;
+            jlog(@"CanUse: DobbyHook OK at %p, orig=%p", g_funcCanUse, g_origCanUse);
+        } else {
+            jlog(@"CanUse: DobbyHook FAILED ret=%d addr=%p", ret, g_funcCanUse);
         }
-    } else if (!enable && g_cdPatched) {
-        // 恢复原始指令
-        kern_return_t kr = patchCode(g_funcCanUse, g_origCanUse, g_origCanUseLen);
-        jlog(@"CanUse: restored %p kr=%d", g_funcCanUse, kr);
-        g_cdPatched = NO;
+    } else if (!enable && g_cdHooked) {
+        int ret = DobbyDestroyHook(g_funcCanUse);
+        if (ret == 0) {
+            g_cdHooked = NO;
+            g_origCanUse = NULL;
+            jlog(@"CanUse: DobbyDestroyHook OK, restored");
+        } else {
+            jlog(@"CanUse: DobbyDestroyHook FAILED ret=%d", ret);
+        }
     }
 }
 
-static void patchIsReady(BOOL enable) {
+static void hookIsReadyFunc(BOOL enable) {
     if (!g_funcIsReady) { jlog(@"IsReady: funcAddr not found"); return; }
     
-    if (enable && !g_energyPatched) {
-        uint32_t *cur = (uint32_t *)g_funcIsReady;
-        jlog(@"IsReady current bytes: %08X %08X %08X %08X", cur[0], cur[1], cur[2], cur[3]);
-        
-        g_origIsReadyLen = 16;
-        memcpy(g_origIsReady, g_funcIsReady, g_origIsReadyLen);
-        jlog(@"IsReady saved orig: %08X %08X %08X %08X",
-             g_origIsReady[0], g_origIsReady[1], g_origIsReady[2], g_origIsReady[3]);
-        
-        kern_return_t kr = patchCode(g_funcIsReady, CODE_RETURN_TRUE, 8);
-        jlog(@"IsReady: patched %p (return true) kr=%d", g_funcIsReady, kr);
-        
-        if (kr == KERN_SUCCESS) {
-            g_energyPatched = YES;
-            uint32_t *v = (uint32_t *)g_funcIsReady;
-            jlog(@"IsReady verify: %08X %08X", v[0], v[1]);
+    if (enable && !g_energyHooked) {
+        int ret = DobbyHook(g_funcIsReady, hookIsReady, (void **)&g_origIsReady);
+        if (ret == 0) {
+            g_energyHooked = YES;
+            jlog(@"IsReady: DobbyHook OK at %p, orig=%p", g_funcIsReady, g_origIsReady);
+        } else {
+            jlog(@"IsReady: DobbyHook FAILED ret=%d addr=%p", ret, g_funcIsReady);
         }
-    } else if (!enable && g_energyPatched) {
-        kern_return_t kr = patchCode(g_funcIsReady, g_origIsReady, g_origIsReadyLen);
-        jlog(@"IsReady: restored %p kr=%d", g_funcIsReady, kr);
-        g_energyPatched = NO;
+    } else if (!enable && g_energyHooked) {
+        int ret = DobbyDestroyHook(g_funcIsReady);
+        if (ret == 0) {
+            g_energyHooked = NO;
+            g_origIsReady = NULL;
+            jlog(@"IsReady: DobbyDestroyHook OK, restored");
+        } else {
+            jlog(@"IsReady: DobbyDestroyHook FAILED ret=%d", ret);
+        }
     }
 }
 
-static void patchLimitDmgValue(int value) {
+static void hookLimitDmgFunc(BOOL enable) {
     if (!g_funcLimitDmg) { jlog(@"LimitDmg: funcAddr not found"); return; }
     
-    if (!g_limitPatched) {
-        uint32_t *cur = (uint32_t *)g_funcLimitDmg;
-        jlog(@"LimitDmg current bytes: %08X %08X %08X %08X", cur[0], cur[1], cur[2], cur[3]);
-        
-        g_origLimitDmgLen = 16;
-        memcpy(g_origLimitDmg, g_funcLimitDmg, g_origLimitDmgLen);
-        jlog(@"LimitDmg saved orig: %08X %08X %08X %08X",
-             g_origLimitDmg[0], g_origLimitDmg[1], g_origLimitDmg[2], g_origLimitDmg[3]);
-    }
-    
-    uint32_t code[4] = {0};
-    makeReturnValue(code, value);
-    int codeLen = (value > 0xFFFF) ? 12 : 8;
-    
-    kern_return_t kr = patchCode(g_funcLimitDmg, code, codeLen);
-    jlog(@"LimitDmg: patched %p (return %d) kr=%d len=%d", g_funcLimitDmg, value, kr, codeLen);
-    
-    if (kr == KERN_SUCCESS) {
-        g_limitPatched = YES;
+    if (enable && !g_limitHooked) {
+        int ret = DobbyHook(g_funcLimitDmg, hookLimitDmg, (void **)&g_origLimitDmg);
+        if (ret == 0) {
+            g_limitHooked = YES;
+            jlog(@"LimitDmg: DobbyHook OK at %p, orig=%p", g_funcLimitDmg, g_origLimitDmg);
+        } else {
+            jlog(@"LimitDmg: DobbyHook FAILED ret=%d addr=%p", ret, g_funcLimitDmg);
+        }
+    } else if (!enable && g_limitHooked) {
+        int ret = DobbyDestroyHook(g_funcLimitDmg);
+        if (ret == 0) {
+            g_limitHooked = NO;
+            g_origLimitDmg = NULL;
+            jlog(@"LimitDmg: DobbyDestroyHook OK, restored");
+        } else {
+            jlog(@"LimitDmg: DobbyDestroyHook FAILED ret=%d", ret);
+        }
     }
 }
 
-static void restoreLimitDmg(void) {
-    if (!g_limitPatched || !g_funcLimitDmg) return;
-    
-    kern_return_t kr = patchCode(g_funcLimitDmg, g_origLimitDmg, g_origLimitDmgLen);
-    jlog(@"LimitDmg: restored %p kr=%d", g_funcLimitDmg, kr);
-    g_limitPatched = NO;
-}
-
-static void applyAllPatches(void) {
+static void applyAllHooks(void) {
     if (!g_infoCanUse) findIL2CPP();
     
-    if (g_noCD) patchCanUse(YES);
-    if (g_noEnergy) patchIsReady(YES);
-    patchLimitDmgValue(g_damageLimit);
+    if (g_noCD) hookCanUseFunc(YES);
+    if (g_noEnergy) hookIsReadyFunc(YES);
+    hookLimitDmgFunc(YES);
     
-    jlog(@"applyAllPatches done (直接修改函数机器码, 和libtool一样)");
+    jlog(@"applyAllHooks done (Dobby inline hook, 和libtool一样!)");
 }
 
 // ============================================================
@@ -413,16 +356,19 @@ static void togglePanel(UIView *bv) {
 + (instancetype)shared { static JYJHActionHandler *s; static dispatch_once_t o; dispatch_once(&o,^{s=[[self alloc]init];}); return s; }
 - (void)onCD {
     g_noCD=!g_noCD; refreshButtons();
-    patchCanUse(g_noCD);
+    hookCanUseFunc(g_noCD);
 }
 - (void)onEnergy {
     g_noEnergy=!g_noEnergy; refreshButtons();
-    patchIsReady(g_noEnergy);
+    hookIsReadyFunc(g_noEnergy);
 }
 - (void)sliderChanged:(UISlider *)s {
     g_damageLimit=(int)s.value;
     g_sliderLabel.text=[NSString stringWithFormat:@"\u4f24\u5bb3\u4e0a\u9650: %d",g_damageLimit];
-    patchLimitDmgValue(g_damageLimit);
+    // v10关键优化: slider变化不需要重新hook!
+    // hookLimitDmg里面读取g_damageLimit全局变量
+    // 只要hook已经设置, 伤害值就自动跟随slider变化
+    // 这比v9.2每次slider变化都vm_protect+memcpy好太多了!
 }
 @end
 
@@ -473,14 +419,14 @@ static void setupUI(void) {
     g_panel.backgroundColor=[UIColor colorWithRed:0.08 green:0.08 blue:0.12 alpha:0.98];
     g_panel.layer.cornerRadius=14; g_panel.hidden=YES; [win addSubview:g_panel];
     UILabel *title=[[UILabel alloc]initWithFrame:CGRectMake(0,10,260,24)];
-    title.text=@"\u5251\u5f71\u6c5f\u6e56 v9.2"; title.textColor=[UIColor cyanColor];
+    title.text=@"\u5251\u5f71\u6c5f\u6e56 v10.0 (Dobby)"; title.textColor=[UIColor cyanColor];
     title.font=[UIFont boldSystemFontOfSize:15]; title.textAlignment=NSTextAlignmentCenter; [g_panel addSubview:title];
     g_btnCD=[UIButton buttonWithType:UIButtonTypeCustom]; g_btnCD.frame=CGRectMake(16,42,228,36);
     g_btnCD.layer.cornerRadius=8; [g_btnCD addTarget:[JYJHActionHandler shared] action:@selector(onCD) forControlEvents:UIControlEventTouchUpInside]; [g_panel addSubview:g_btnCD];
     g_btnEnergy=[UIButton buttonWithType:UIButtonTypeCustom]; g_btnEnergy.frame=CGRectMake(16,84,228,36);
     g_btnEnergy.layer.cornerRadius=8; [g_btnEnergy addTarget:[JYJHActionHandler shared] action:@selector(onEnergy) forControlEvents:UIControlEventTouchUpInside]; [g_panel addSubview:g_btnEnergy];
     g_sliderLabel=[[UILabel alloc]initWithFrame:CGRectMake(16,128,228,20)];
-    g_sliderLabel.text=@"伤害上限: 10000"; g_sliderLabel.textColor=[UIColor whiteColor];
+    g_sliderLabel.text=@"\u4f24\u5bb3\u4e0a\u9650: 10000"; g_sliderLabel.textColor=[UIColor whiteColor];
     g_sliderLabel.font=[UIFont systemFontOfSize:13]; [g_panel addSubview:g_sliderLabel];
     g_slider=[[UISlider alloc]initWithFrame:CGRectMake(16,150,228,28)];
     g_slider.minimumValue=100; g_slider.maximumValue=10000; g_slider.value=10000;
@@ -502,17 +448,17 @@ static void initialize(void) {
     loaded = YES;
     
     g_debugLines=[NSMutableArray new];
-    jlog(@"========== JYJH v9.2 ==========");
+    jlog(@"========== JYJH v10.0 (Dobby) ==========");
     jlog(@"iOS %@", [[UIDevice currentDevice] systemVersion]);
     jlog(@"Bundle %@", [[NSBundle mainBundle] bundleIdentifier]);
-    jlog(@"Strategy: 直接修改游戏函数机器码 (和libtool一样)");
+    jlog(@"Strategy: Dobby inline hook (和libtool一样!)");
     
     // 延迟5秒, 等IL2CPP运行时初始化完成
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(5.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
-        jlog(@"5s delay done, applying patches...");
-        applyAllPatches();
+        jlog(@"5s delay done, applying hooks...");
+        applyAllHooks();
         
-        // 等3秒后再显示UI (让patch先生效)
+        // 等3秒后再显示UI (让hook先生效)
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
             setupUI();
         });
