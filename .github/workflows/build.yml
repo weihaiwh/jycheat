@@ -100,11 +100,12 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v8.0
+          tag_name: v8.1
           files: output/*
           body: |
-            ## 剑影江湖 v8.0 无CD无能量技能插件
+            ## 剑影江湖 v8.1 无CD无能量技能插件
             - ✅ 无CD + 无能量 + 伤害上限滑条
+            - v8.1: 修复patchMem把数据页设为RX导致闪退的致命Bug
             - 使用IL2CPP运行时API + MethodInfo指针替换，不依赖Substrate
             - 适配 iOS 15+ / 无根越狱 / TrollStore
         env:

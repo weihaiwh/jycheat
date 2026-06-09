@@ -1,11 +1,26 @@
 /**
- * 剑影江湖 v8.0 - IL2CPP运行时方法指针替换
+ * 剑影江湖 v8.1 - IL2CPP运行时方法指针替换
  * 
+ * v8.0→v8.1 修复的Bug:
+ * 
+ * Bug 4: patchMem把MethodInfo数据页设为RX导致闪退
+ *   原代码: vm_protect(WRITE|COPY) → memcpy → vm_protect(READ|EXECUTE)
+ *   问题: MethodInfo在数据段, 设为RX后游戏IL2CPP运行时无法写入同页的其他MethodInfo
+ *   闪退原因: 游戏在运行时需要动态修改MethodInfo数据(如JIT编译结果),
+ *             被锁为RX后触发EXC_BAD_ACCESS
+ *   修复: 不再设数据页为RX, 修改后保持RW权限, 让游戏可以正常操作
+ *
+ * Bug 5: UI使用deprecated API获取window
+ *   [UIApplication sharedApplication].windows 在iOS 15已deprecated
+ *   修复: 使用UIWindowScene.windows获取keyWindow
+ *
+ * Bug 6: dylib可能被重复加载 (日志出现两次初始化)
+ *   修复: 添加static BOOL防止重复初始化
+ *
  * v7.4→v8.0 修复的致命Bug:
  * 
  * Bug 1: STP寄存器编码错误
  *   0xA90153F3 = STP x19,x19 (错!)  →  0xA9014FF3 = STP x19,x20 (对)
- *   0xA9024BF5 = STP x21,x22 (错!)  →  0xA90257F5 = STP x21,x22 (对)
  *   所有callee-saved寄存器对编码都有问题
  *   根本原因: ARM64 STP格式 Rt1[4:0] Rn[9:5] Rt2[14:10], 原编码搞反了Rt1/Rt2
  *
@@ -99,28 +114,61 @@ static BOOL g_panelOpen = NO;
 // ============================================================
 
 /**
- * 对目标地址所在页设置RWX, 写入数据, 刷新icache, 恢复RX
- * 用于修改IL2CPP的MethodInfo结构(在GameAssembly.dll的数据段中)
+ * 写入MethodInfo数据段 (替换methodPointer)
+ * 
+ * IL2CPP的MethodInfo结构在GameAssembly.dll的数据段, 不是代码段.
+ * 数据段默认是RW, 所以直接memcpy写入即可.
+ * 
+ * 如果写入失败(页权限问题), 用vm_protect临时设为RW, 写完不要改回RX!
+ * 因为数据段上还有其他MethodInfo, 游戏后续还需要修改它们.
+ * 设为RX会导致:
+ *   1) 后续patchMem无法再写入同页的其他MethodInfo
+ *   2) 游戏自身的IL2CPP代码也无法写入同页数据
+ *   3) 最终触发EXC_BAD_ACCESS闪退
  */
 static kern_return_t patchMem(void *addr, const void *data, size_t sz) {
     if (!addr) return KERN_INVALID_ADDRESS;
-    vm_address_t pg = (vm_address_t)addr & ~(vm_page_size - 1);
-    // 先尝试 VM_PROT_COPY (Copy-on-Write映射, 不影响原始页)
-    kern_return_t kr = vm_protect(mach_task_self(), pg, vm_page_size, 0,
-                                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-    if (kr != KERN_SUCCESS) {
-        // 回退到 VM_PROT_ALL
-        kr = vm_protect(mach_task_self(), pg, vm_page_size, 0, VM_PROT_ALL);
+    
+    // 尝试直接写入 (IL2CPP数据段通常已经是RW)
+    // 先用vm_read_overwrite测试是否可写
+    vm_size_t outSize = 0;
+    void *testBuf = NULL;
+    kern_return_t kr;
+    
+    // 分配临时buffer, 读取当前值作为验证
+    testBuf = malloc(sz);
+    if (!testBuf) return KERN_RESOURCE_SHORTAGE;
+    
+    kr = vm_read_overwrite(mach_task_self(), (vm_address_t)addr, sz, (vm_address_t)testBuf, &outSize);
+    if (kr == KERN_SUCCESS && outSize == sz) {
+        // 可读, 尝试直接写入
+        memcpy(addr, data, sz);
+        // 验证写入是否成功
+        if (memcmp(addr, data, sz) == 0) {
+            free(testBuf);
+            return KERN_SUCCESS;
+        }
     }
+    free(testBuf);
+    
+    // 直接写入失败, 需要临时修改页权限为RW
+    vm_address_t pg = (vm_address_t)addr & ~(vm_page_size - 1);
+    kr = vm_protect(mach_task_self(), pg, vm_page_size, 0,
+                    VM_PROT_READ | VM_PROT_WRITE);
     if (kr != KERN_SUCCESS) {
-        jlog(@"patchMem vm_protect FAIL addr=%p kr=%d", addr, kr);
+        jlog(@"patchMem vm_protect RW FAIL addr=%p kr=%d", addr, kr);
         return kr;
     }
+    
     memcpy(addr, data, sz);
-    sys_icache_invalidate(addr, sz);
-    // 恢复为只读+执行
-    vm_protect(mach_task_self(), pg, vm_page_size, 0, VM_PROT_READ | VM_PROT_EXECUTE);
-    return KERN_SUCCESS;
+    
+    // 验证写入成功
+    if (memcmp(addr, data, sz) == 0) {
+        return KERN_SUCCESS;
+    }
+    
+    jlog(@"patchMem verify FAIL addr=%p", addr);
+    return KERN_FAILURE;
 }
 
 // ============================================================
@@ -550,17 +598,40 @@ static void togglePanel(UIView *bv) {
 - (void)touchesCancelled:(NSSet*)t withEvent:(UIEvent*)e{_drag=NO;}
 @end
 
+static UIWindow *getKeyWindow(void) {
+    // iOS 15+ 推荐使用 UIWindowScene.windows
+    if (@available(iOS 15.0, *)) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (scene.activationState == UISceneActivationStateForegroundActive &&
+                [scene isKindOfClass:[UIWindowScene class]]) {
+                for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+                    if (w.isKeyWindow && !w.isHidden) return w;
+                }
+                for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+                    if (!w.isHidden) return w;
+                }
+            }
+        }
+    }
+    // Fallback for iOS < 15
+    for (UIWindow *w in [UIApplication sharedApplication].windows) {
+        if (w.isKeyWindow && !w.isHidden) return w;
+    }
+    for (UIWindow *w in [UIApplication sharedApplication].windows) {
+        if (!w.isHidden) return w;
+    }
+    return nil;
+}
+
 static void setupUI(void) {
-    UIWindow *win = nil;
-    for (UIWindow *w in [UIApplication sharedApplication].windows) if (w.isKeyWindow && !w.isHidden) { win = w; break; }
-    if (!win) for (UIWindow *w in [UIApplication sharedApplication].windows) if (!w.isHidden) { win = w; break; }
+    UIWindow *win = getKeyWindow();
     if (!win) { dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{setupUI();}); return; }
     JYJHBallView *ball = [[JYJHBallView alloc] init]; [win addSubview:ball];
     g_panel=[[UIView alloc]initWithFrame:CGRectMake(0,0,260,400)];
     g_panel.backgroundColor=[UIColor colorWithRed:0.08 green:0.08 blue:0.12 alpha:0.98];
     g_panel.layer.cornerRadius=14; g_panel.hidden=YES; [win addSubview:g_panel];
     UILabel *title=[[UILabel alloc]initWithFrame:CGRectMake(0,10,260,24)];
-    title.text=@"\u5251\u5f71\u6c5f\u6e56 v8.0"; title.textColor=[UIColor cyanColor];
+    title.text=@"\u5251\u5f71\u6c5f\u6e56 v8.1"; title.textColor=[UIColor cyanColor];
     title.font=[UIFont boldSystemFontOfSize:15]; title.textAlignment=NSTextAlignmentCenter; [g_panel addSubview:title];
     g_btnCD=[UIButton buttonWithType:UIButtonTypeCustom]; g_btnCD.frame=CGRectMake(16,42,228,36);
     g_btnCD.layer.cornerRadius=8; [g_btnCD addTarget:[JYJHActionHandler shared] action:@selector(onCD) forControlEvents:UIControlEventTouchUpInside]; [g_panel addSubview:g_btnCD];
@@ -584,8 +655,13 @@ static void setupUI(void) {
 
 __attribute__((constructor))
 static void initialize(void) {
+    // 防止重复加载
+    static BOOL loaded = NO;
+    if (loaded) { jlog(@"Already loaded, skip"); return; }
+    loaded = YES;
+    
     g_debugLines=[NSMutableArray new];
-    jlog(@"========== JYJH v8.0 ==========");
+    jlog(@"========== JYJH v8.1 ==========");
     jlog(@"iOS %@", [[UIDevice currentDevice] systemVersion]);
     jlog(@"Bundle %@", [[NSBundle mainBundle] bundleIdentifier]);
     
