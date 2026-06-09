@@ -34,13 +34,18 @@ jobs:
 
       - name: Build tweak dylib
         run: |
-          CLANG=$(find /tmp/cctools -name "clang" -type f | head -1)
+          # cctools clang is at target/bin/clang (no 'arm-apple-' prefix in some builds)
+          CLANG=$(find /tmp/cctools/usage_examples/ios_toolchain/target/bin -name "*clang*" -type f ! -name "*.la" | head -1)
+          # Fallback: search wider
+          if [ -z "$CLANG" ]; then CLANG=$(find /tmp/cctools -name "clang" -type f | head -1); fi
           SDK=$(find /tmp/cctools -name "iPhoneOS*.sdk" -type d | head -1)
           LDID=$(find /tmp/cctools -name "ldid" -type f | head -1)
           
           echo "clang: $CLANG"
           echo "SDK: $SDK"
           echo "ldid: $LDID"
+          
+          if [ -z "$CLANG" ]; then echo "ERROR: clang not found!"; ls /tmp/cctools/usage_examples/ios_toolchain/target/bin/; exit 1; fi
           
           # This version uses direct memory patching - NO substrate needed!
           # Only needs Foundation + UIKit frameworks
