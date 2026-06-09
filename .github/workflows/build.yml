@@ -34,21 +34,23 @@ jobs:
 
       - name: Build tweak dylib
         run: |
-          # cctools clang is at target/bin/clang (no 'arm-apple-' prefix in some builds)
+          # cctools clang is at target/bin/ with arm-apple-darwin11- prefix
           CLANG=$(find /tmp/cctools/usage_examples/ios_toolchain/target/bin -name "*clang*" -type f ! -name "*.la" | head -1)
-          # Fallback: search wider
-          if [ -z "$CLANG" ]; then CLANG=$(find /tmp/cctools -name "clang" -type f | head -1); fi
           SDK=$(find /tmp/cctools -name "iPhoneOS*.sdk" -type d | head -1)
           LDID=$(find /tmp/cctools -name "ldid" -type f | head -1)
+          # Use cctools ld (not host ld) - has arm-apple-darwin11- prefix
+          LD=$(find /tmp/cctools/usage_examples/ios_toolchain/target/bin -name "*ld" -type f ! -name "ldid" ! -name "*.la" | head -1)
           
           echo "clang: $CLANG"
           echo "SDK: $SDK"
           echo "ldid: $LDID"
+          echo "ld: $LD"
           
           if [ -z "$CLANG" ]; then echo "ERROR: clang not found!"; ls /tmp/cctools/usage_examples/ios_toolchain/target/bin/; exit 1; fi
           
           # This version uses direct memory patching - NO substrate needed!
           # Only needs Foundation + UIKit frameworks
+          # -mlinker-version=609 forces cctools ld instead of LLD
           $CLANG \
             -arch arm64 \
             -miphoneos-version-min=15.0 \
@@ -57,6 +59,7 @@ jobs:
             -dynamiclib \
             -framework Foundation \
             -framework UIKit \
+            -mlinker-version=609 \
             -install_name @executable_path/JYJH_NoCDNoEnergy.dylib \
             -o JYJH_NoCDNoEnergy.dylib \
             JYJH_NoCDNoEnergy.m
