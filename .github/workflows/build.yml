@@ -1,4 +1,4 @@
-name: Build JYJH NoCD NoEnergy Dylib (v12.1 dump-cs)
+name: Build JYJH NoCD NoEnergy Dylib (v12.2)
 
 on:
   push:
@@ -82,7 +82,7 @@ jobs:
           ls -la "$DOBBY_LIB" || { echo "Dobby lib not found!"; exit 1; }
           
           # Compile .m -> .o (include dobby.h from project root)
-          # v12: 精确方法名匹配
+          ## v12.2: CalcBufferDamage 10参数hook移除, 伤害通过limitDamage实现
           arm-apple-darwin11-clang \
             -arch arm64 \
             -miphoneos-version-min=15.0 \
@@ -134,14 +134,13 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v12.1
+          tag_name: v12.2
           files: output/*
           body: |
-            ## 剑影江湖 v12.1 - 基于dump.cs签名修正
-            - ✅ 无CD + 无能量 + 无限怒气 + 伤害区分攻击者
-            - v12.1: 基于com.jyjh.whwb_1.10.1.cs修正函数签名
-            - CalcBufferDamage有attackerCf/defCf参数, 可区分攻击者
-            - 移除不存在的SkillModel.CheckSkill
-            - 修复偶尔卡住的问题
+            ## 剑影江湖 v12.2 - CalcBufferDamage移除, limitDamage生效
+            - ✅ 无CD + 无能量 + 无限怒气 + 伤害上限
+            - v12.2: 移除CalcBufferDamage hook (10参数cctools交叉编译失败)
+            - 伤害上限通过 get_limitDamage hook 实现
+            - 保留: CheckSkillUnlock + CanUseExSkill + IsExSkillInCD hook
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

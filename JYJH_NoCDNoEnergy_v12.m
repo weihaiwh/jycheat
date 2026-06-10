@@ -1,5 +1,5 @@
 /**
- * 剑影江湖 v12.1 - 精确方法Hook (基于dump.cs签名修正)
+ * 剑影江湖 v12.2 - 精确方法Hook (基于dump.cs签名修正)
  * 
  * v12.0日志: 所有9个方法都找到了! 但大招仍不能释放, 偶尔卡住
  * 
@@ -17,11 +17,11 @@
  *   所以hookIsReady等函数的参数对应是正确的(4个参数), 但含义不同
  *   关键: 这些都是static方法, 第一个参数不是this!
  *
- * v12.1修改:
- *   1. CalcBufferDamage hook: 判断attackerCf是否是本地玩家, 只对玩家伤害生效
- *   2. 移除SkillModel.CheckSkill hook (不存在于dump.cs)
+ * v12.2修改:
+ *   1. 移除CalcBufferDamage hook (10参数函数cctools交叉编译失败, 待后续解决)
+ *   2. 伤害上限通过 get_limitDamage hook 实现 (已验证有效)
  *   3. 保留IsExSkillInCD + CanUseExSkill hook (大招CD和使用次数)
- *   4. 修复偶尔卡住: hookCheckSkill/hookCanUseExSkill可能返回值不对
+ *   4. 保留CheckSkillUnlock hook (忽略30级解锁)
  */
 
 #import <mach-o/dyld.h>
@@ -82,31 +82,43 @@ static BOOL g_energyHooked = NO;
 static BOOL g_limitHooked = NO;
 
 // v12: 新增精确hook
+// UnityFramework反汇编确认的签名:
+//   CheckSkillAttackCanUse(Frame, CharacterStateType, CharacterFiled*, CharacterStatesAsset) → 4参数 ✅BoolFunc4
+//   CheckSkillIsReady(Frame, CharacterStateType, CharacterFiled*, CharacterStatesAsset) → 4参数 ✅BoolFunc4
+//   CheckSkillUnlock(Frame, CharacterFiled*, CharacterStateType) → 3参数 ★
+//   CanUseExSkill(Int64, Int32, Int32) → 3参数 ★
+//   IsExSkillInCD(FP, ExSkillData*, ExSkillInfo) → 3参数 ★
+
 static void *g_funcCheckSkillUnlock = NULL;
-static BoolFunc4 g_origCheckSkillUnlock = NULL;
+// CheckSkillUnlock有3个参数, 但用4参数的BoolFunc4也没问题(ARM64 ABI忽略多余参数)
+typedef BOOL (*BoolFunc3)(void*, int, int);
+static BoolFunc3 g_origCheckSkillUnlock = NULL;
 static BOOL g_skillUnlockHooked = NO;
 
 // SkillModel.CheckSkill不存在于dump.cs, 移除
 
 static void *g_funcCanUseExSkill = NULL;
 // CanUseExSkill(Int64 customParam, Int32 usedTimesPack, Int32 exSkillIdx) → bool
-// 签名: bool(int64_t, int32_t, int32_t) — 但IL2CPP统一按指针传参
-static BoolFunc4 g_origCanUseExSkill = NULL;
+// 3参数: x0=customParam(8字节), x1=usedTimesPack, x2=exSkillIdx
+typedef BOOL (*BoolFunc3_64)(int64_t, int, int);
+static BoolFunc3_64 g_origCanUseExSkill = NULL;
 static BOOL g_canUseExSkillHooked = NO;
 
 static void *g_funcIsExSkillInCD = NULL;
 // IsExSkillInCD(FP now, ExSkillData* skillp, ExSkillInfo info) → bool
-static BoolFunc4 g_origIsExSkillInCD = NULL;
+// 3参数: x0=FP(8字节), x1=ExSkillData*, x2=ExSkillInfo(值类型,8字节)
+typedef BOOL (*BoolFunc3_64)(int64_t, int, int);
+static BoolFunc3_64 g_origIsExSkillInCD = NULL;
 static BOOL g_isExSkillInCDHooked = NO;
 
 // CalcBufferDamage(Frame, CharacterFiled* attackerCf, DestroyedEntityData, CharacterFiled* defCf,
 //                  ref UInt32& hurtFlag, ref Int64& wuxingDmg, SkillDamageType, Int64 damage, Int32 hurtRate, Int32 skillButton)
 // ★attackerCf(x1)和defCf(x3)可以区分攻击者!
 // ARM64 calling convention: 10 params → x0-x7 + 栈上2个
-// 所有参数在ARM64 ABI下都是8字节, 统一用void*避免类型不兼容编译错误
+// ★暂不hook CalcBufferDamage — 10参数函数在cctools交叉编译下有问题
+//   伤害上限通过 get_limitDamage hook 实现 (已工作)
+//   后续如需区分玩家/怪物伤害, 再解决CalcBufferDamage编译问题
 static void *g_funcCalcBufferDamage = NULL;
-typedef void* (*CalcDmgFunc)(void*, void*, void*, void*, void*, void*, void*, void*, void*, void*);
-static CalcDmgFunc g_origCalcBufferDamage = NULL;
 static BOOL g_calcBufferDmgHooked = NO;
 
 // UI
@@ -138,71 +150,38 @@ static int hookLimitDmg(void *self) {
     return g_damageLimit;
 }
 
-/** CheckSkillUnlock → true (忽略30级解锁) */
-static BOOL hookCheckSkillUnlock(void *self, int a1, int a2, int a3) {
+/** CheckSkillUnlock(Frame, CharacterFiled*, CharacterStateType) → true (忽略30级解锁) */
+static BOOL hookCheckSkillUnlock(void *frame, int a1, int a2) {
     if (g_noAnger) {
         jlog(@"CheckSkillUnlock→true");
         return YES;
     }
-    if (g_origCheckSkillUnlock) return g_origCheckSkillUnlock(self, a1, a2, a3);
+    if (g_origCheckSkillUnlock) return g_origCheckSkillUnlock(frame, a1, a2);
     return YES;
 }
 
-/** CanUseExSkill → true (大招可用, 忽略使用次数限制) */
-static BOOL hookCanUseExSkill(void *self, int a1, int a2, int a3) {
+/** CanUseExSkill(Int64, Int32, Int32) → true (大招可用, 忽略使用次数限制) */
+static BOOL hookCanUseExSkill(int64_t customParam, int usedTimesPack, int exSkillIdx) {
     if (g_noAnger) {
-        jlog(@"CanUseExSkill→true param=%d,%d,%d", a1, a2, a3);
+        jlog(@"CanUseExSkill→true param=%lld,%d,%d", customParam, usedTimesPack, exSkillIdx);
         return YES;
     }
-    if (g_origCanUseExSkill) return g_origCanUseExSkill(self, a1, a2, a3);
+    if (g_origCanUseExSkill) return g_origCanUseExSkill(customParam, usedTimesPack, exSkillIdx);
     return YES;
 }
 
-/** IsExSkillInCD → false (大招不在CD) */
-static BOOL hookIsExSkillInCD(void *self, int a1, int a2, int a3) {
+/** IsExSkillInCD(FP, ExSkillData*, ExSkillInfo) → false (大招不在CD) */
+static BOOL hookIsExSkillInCD(int64_t now, int skillp, int info) {
     if (g_noAnger) {
         jlog(@"IsExSkillInCD→false");
         return NO;  // false = 不在CD
     }
-    if (g_origIsExSkillInCD) return g_origIsExSkillInCD(self, a1, a2, a3);
+    if (g_origIsExSkillInCD) return g_origIsExSkillInCD(now, skillp, info);
     return NO;
 }
 
-/**
- * CalcBufferDamage hook - 伤害只对玩家生效
- * 签名: Int64 CalcBufferDamage(Frame, CharacterFiled* attackerCf, DestroyedEntityData,
- *                               CharacterFiled* defCf, ref UInt32& hurtFlag, ref Int64& wuxingDmg,
- *                               SkillDamageType, Int64 damage, Int32 hurtRate, Int32 skillButton)
- * ARM64寄存器: x0-x7传8个参数, 栈传剩余2个
- * 所有参数在ARM64 ABI下对齐到8字节, 统一用void*避免编译类型错误
- * ★attackerCf(x1)和defCf(x3)可以区分攻击者!
- * 
- * 策略: 判断attackerCf是否是玩家, 如果是则应用伤害上限
- *   如何判断是否是玩家: CharacterFiled有IsPlayerOrMonster方法
- *   但最简单的方式: 直接用limitDamage替换damage参数
- */
-static void* hookCalcBufferDamage(void *frame, void *attackerCf, void *destroyedEData,
-                                  void *defCf, void *hurtFlag, void *wuxingDmg,
-                                  void *p7, void *p8, void *p9, void *p10) {
-    // 调用原始函数
-    void *result = NULL;
-    if (g_origCalcBufferDamage) {
-        result = g_origCalcBufferDamage(frame, attackerCf, destroyedEData, defCf,
-                                         hurtFlag, wuxingDmg, p7, p8, p9, p10);
-    }
-    
-    // 只在有攻击者时修改伤害 (attackerCf非空 = 有攻击者)
-    if (g_damageLimit > 0 && attackerCf != NULL) {
-        static int logCount = 0;
-        if (logCount < 5) {
-            jlog(@"CalcBufferDamage: atk=%p def=%p orig=%p → %d", attackerCf, defCf, result, g_damageLimit);
-            logCount++;
-        }
-        return (void*)(intptr_t)g_damageLimit;
-    }
-    
-    return result;
-}
+// CalcBufferDamage hook 暂不实现 — 10参数函数在cctools交叉编译下有问题
+// 伤害上限通过 get_limitDamage hook 已实现
 
 // ============================================================
 // IL2CPP运行时API
@@ -337,17 +316,17 @@ static void applyAllHooks(void) {
     if (g_noEnergy) hookOneFunc(g_funcIsReady, (void*)hookIsReady, (void**)&g_origIsReady, &g_energyHooked, "IsReady");
     hookOneFunc(g_funcLimitDmg, (void*)hookLimitDmg, (void**)&g_origLimitDmg, &g_limitHooked, "LimitDmg");
     
-    // v12.1: 精确hook (大招解锁+怒气)
+    // v12.2: 精确hook (基于UnityFramework反汇编确认的参数数量)
     if (g_noAnger) {
         hookOneFunc(g_funcCheckSkillUnlock, (void*)hookCheckSkillUnlock, (void**)&g_origCheckSkillUnlock, &g_skillUnlockHooked, "CheckSkillUnlock★");
         hookOneFunc(g_funcCanUseExSkill, (void*)hookCanUseExSkill, (void**)&g_origCanUseExSkill, &g_canUseExSkillHooked, "CanUseExSkill★");
         hookOneFunc(g_funcIsExSkillInCD, (void*)hookIsExSkillInCD, (void**)&g_origIsExSkillInCD, &g_isExSkillInCDHooked, "IsExSkillInCD★");
     }
     
-    // v12.1: CalcBufferDamage hook - 伤害只对有攻击者的战斗生效
-    hookOneFunc(g_funcCalcBufferDamage, (void*)hookCalcBufferDamage, (void**)&g_origCalcBufferDamage, &g_calcBufferDmgHooked, "CalcBufferDamage★");
+    // CalcBufferDamage hook 暂不实现 — 10参数函数在cctools交叉编译下有问题
+    // 伤害上限通过 get_limitDamage hook 已实现
     
-    jlog(@"applyAllHooks done (v12.1 - 精确匹配+伤害区分)");
+    jlog(@"applyAllHooks done (v12.2 - 精确参数+伤害通过limitDamage)");
 }
 
 // ============================================================
@@ -449,7 +428,7 @@ static void setupUI(void) {
     g_panel.backgroundColor=[UIColor colorWithRed:0.08 green:0.08 blue:0.12 alpha:0.98];
     g_panel.layer.cornerRadius=14; g_panel.hidden=YES; [win addSubview:g_panel];
     UILabel *title=[[UILabel alloc]initWithFrame:CGRectMake(0,10,260,24)];
-    title.text=@"\u5251\u5f71\u6c5f\u6e56 v12.1"; title.textColor=[UIColor cyanColor];
+    title.text=@"\u5251\u5f71\u6c5f\u6e56 v12.2"; title.textColor=[UIColor cyanColor];
     title.font=[UIFont boldSystemFontOfSize:15]; title.textAlignment=NSTextAlignmentCenter; [g_panel addSubview:title];
     g_btnCD=[UIButton buttonWithType:UIButtonTypeCustom]; g_btnCD.frame=CGRectMake(16,42,228,36);
     g_btnCD.layer.cornerRadius=8; [g_btnCD addTarget:[JYJHActionHandler shared] action:@selector(onCD) forControlEvents:UIControlEventTouchUpInside]; [g_panel addSubview:g_btnCD];
@@ -480,10 +459,10 @@ static void initialize(void) {
     loaded = YES;
     
     g_debugLines=[NSMutableArray new];
-    jlog(@"========== JYJH v12.1 (dump.cs签名修正) ==========");
+    jlog(@"========== JYJH v12.2 (CalcBufferDamage移除, limitDamage生效) ==========");
     jlog(@"iOS %@", [[UIDevice currentDevice] systemVersion]);
     jlog(@"Bundle %@", [[NSBundle mainBundle] bundleIdentifier]);
-    jlog(@"v12.1: 基于dump.cs签名修正 + CalcBufferDamage区分攻击者");
+    jlog(@"v12.2: 移除CalcBufferDamage(10参数编译失败), 伤害上限通过limitDamage实现");
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(5.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
         jlog(@"5s delay done, applying hooks...");
