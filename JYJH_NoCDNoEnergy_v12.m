@@ -87,20 +87,18 @@ static void *g_funcCalcBufferDamage = NULL;
  * 无CD: CheckSkillAttackCanUse
  * 签名: (Frame, CharacterStateType, CharacterFiled*, CharacterStatesAsset)
  * BoolFunc4映射: self=x0=Frame*, a1=x1=stateType, a2=x2=characterField, a3=x3=states
- * 
- * 只对普通技能(Skill1-4)返回true, 大招(Skill5-6)让原函数处理
+ *
+ * 只对普通技能(Skill1-4)返回true, 大招(Skill5-6)保留原逻辑
  * 大招的CD由IsExSkillInCD hook处理
  */
 static BOOL hookCanUse(void *self, int a1, int a2, int a3) {
     if (g_noCD) {
-        int stateType = a1;
-        if (stateType >= SKILL5) {
-            // 大招: 只在忽略解锁+大招可用时返回true
-            if (g_ignoreUnlock && g_exSkillAvail) return YES;
-        } else {
-            // 普通技能: 直接返回true
+        int stateType = a1;  // x1=stateType
+        if (stateType < SKILL5) {
+            // 普通技能(Skill1-4): 直接返回true
             return YES;
         }
+        // 大招(Skill5-6): 保留原逻辑, 由ExSkill系列hook处理
     }
     if (g_origCanUse) return g_origCanUse(self, a1, a2, a3);
     return YES;
@@ -116,23 +114,35 @@ static BOOL hookCanUse(void *self, int a1, int a2, int a3) {
  */
 static BOOL hookIsReady(void *self, int a1, int a2, int a3) {
     if (g_noEnergy) {
-        int stateType = a1;
-        if (stateType >= SKILL5) {
-            // 大招: 需要同时满足忽略解锁+大招无CD才返回true
-            // 否则服务端帧同步逻辑不允许, 会导致卡死
-            if (g_ignoreUnlock && g_exSkillNoCD) return YES;
-        } else {
-            // 普通技能: 直接返回true
+        int stateType = a1;  // x1=stateType
+        if (stateType < SKILL5) {
+            // 普通技能(Skill1-4): 直接返回true
             return YES;
         }
+        // 大招(Skill5-6): 保留原逻辑!
+        // 大招的怒气/能量由ExSkillData.Data控制, 属于帧同步状态
+        // 强制返回true会导致客户端与服务端不同步, 游戏卡死
     }
     if (g_origIsReady) return g_origIsReady(self, a1, a2, a3);
     return YES;
 }
 
-/** 忽略解锁: CheckSkillUnlock → true */
+/** 忽略解锁: CheckSkillUnlock → true
+ * 签名: (Frame, CharacterFiled*, CharacterStateType)
+ * BoolFunc4映射: self=x0=Frame*, a1=x1=characterField*, a2=x2=stateType, a3=x3(unused)
+ * 注意: stateType在a2(第三个参数), 不在a1!
+ */
 static BOOL hookCheckSkillUnlock(void *self, int a1, int a2, int a3) {
-    if (g_ignoreUnlock) return YES;
+    if (g_ignoreUnlock) {
+        // 检查是否是大招(Skill5-6): stateType在a2
+        int stateType = a2;
+        if (stateType >= SKILL5) {
+            // 大招解锁: 直接返回true, 允许提前使用30级大招
+            return YES;
+        }
+        // 普通技能也返回true
+        return YES;
+    }
     if (g_origCheckSkillUnlock) return g_origCheckSkillUnlock(self, a1, a2, a3);
     return YES;
 }
@@ -145,18 +155,37 @@ static BOOL hookCanUseExSkill(void *self, int a1, int a2, int a3) {
 }
 
 /**
- * 大招无CD: IsExSkillInCD → false + 清除LastTriggerTime@0x20
- * ExSkillData(值类型): lv=0x10, id=0x14, Data=0x18, LastTriggerTime=0x20, skills=0x28
- * IsExSkillInCD(FP now, ExSkillData* skillp, ExSkillInfo info)
- * ARM64: x0=now, x1=skillp → BoolFunc4: self=x0, a1=x1=ExSkillData*
+ * 大招无CD: IsExSkillInCD → false + 清除LastTriggerTime + 加满怒气
+ *
+ * ExSkillData结构(dump.cs确认):
+ *   offset 0x10: lv (Int16)
+ *   offset 0x14: id (Int32)
+ *   offset 0x18: Data (FP, 8字节) ← 这是怒气值！
+ *   offset 0x20: LastTriggerTime (FP, 8字节)
+ *   offset 0x28: skills (UInt64)
+ *
+ * ExSkillInfo结构(dump.cs确认):
+ *   offset 0x58: CD (Int32) ← CD时长
+ *
+ * 策略:
+ *   1. 返回false(不在CD)
+ *   2. 清除LastTriggerTime(0x20)绕过TriggerExSkill内部CD检查
+ *   3. 设置ExSkillInfo.CD(0x58)为0, 彻底消除CD
+ *   4. 设置ExSkillData.Data(0x18)为极大值, 加满怒气
  */
 static BOOL hookIsExSkillInCD(void *self, int a1, int a2, int a3) {
     if (g_exSkillNoCD) {
+        // self=x0=now(FP值), a1=x1=ExSkillData*, a2=x2=ExSkillInfo
         void *skillpData = (void*)(uintptr_t)a1;
         if (skillpData) {
-            // LastTriggerTime在offset 0x20 (ExSkillData值类型, dump.cs确认)
+            // 1. 清除LastTriggerTime(0x20), 绕过TriggerExSkill内部CD检查
             uint64_t *ltt = (uint64_t*)((uint8_t*)skillpData + 0x20);
             *ltt = 0;
+            
+            // 2. 设置Data(0x18)为极大值 = 加满怒气
+            // FP是fixed-point, 高位=整数部分。设0x00FFFFFF即可让怒气值极大
+            uint64_t *dataVal = (uint64_t*)((uint8_t*)skillpData + 0x18);
+            *dataVal = 0x0000FFFFFFFFFFFFULL;  // FP极大值 ≈ 无限怒气
         }
         return NO; // 不在CD
     }
@@ -301,7 +330,7 @@ static void applyAllHooks(void) {
     if (g_exSkillNoCD) hookOneFunc(g_funcIsExSkillInCD, hookIsExSkillInCD, (void**)&g_origIsExSkillInCD, &g_isExSkillInCDHooked, "5.大招无CD");
     hookOneFunc(g_funcLimitDmg, hookLimitDmg, (void**)&g_origLimitDmg, &g_limitHooked, "6.伤害上限");
 
-    jlog(@"applyAllHooks done (v12.6 - 区分普通/大招 + LastTriggerTime@0x20)");
+    jlog(@"applyAllHooks done (v12.7 - 大招不卡死 + 怒气加满 + 参数映射修正)");
 }
 
 // ============================================================
@@ -419,7 +448,7 @@ static void setupUI(void) {
     g_panel.layer.cornerRadius=14; g_panel.hidden=YES; [win addSubview:g_panel];
 
     UILabel *title=[[UILabel alloc]initWithFrame:CGRectMake(0,8,pw,22)];
-    title.text=@"\u5251\u5f71\u6c5f\u6e56 v12.6"; title.textColor=[UIColor cyanColor];
+    title.text=@"\u5251\u5f71\u6c5f\u6e56 v12.7"; title.textColor=[UIColor cyanColor];
     title.font=[UIFont boldSystemFontOfSize:14]; title.textAlignment=NSTextAlignmentCenter; [g_panel addSubview:title];
 
     CGFloat bx=16, bw=228, bh=32, by0=34, bdy=36;
@@ -465,10 +494,10 @@ static void initialize(void) {
     if (loaded) { jlog(@"Already loaded, skip"); return; }
     loaded = YES;
 
-    jlog(@"========== JYJH v12.6 (区分普通/大招 + LastTriggerTime@0x20) ==========");
+    jlog(@"========== JYJH v12.7 (大招不卡死 + 怒气加满 + 参数映射修正) ==========");
     jlog(@"iOS %@", [[UIDevice currentDevice] systemVersion]);
     jlog(@"Bundle %@", [[NSBundle mainBundle] bundleIdentifier]);
-    jlog(@"关键修复: 1.CheckSkillIsReady区分普通/大招避免卡死 2.去掉get_IsUnlock/get_IsAnger同地址hook");
+    jlog(@"v12.7: CheckSkillIsReady大招不返回true(防卡死) + IsExSkillInCD加满怒气 + CheckSkillUnlock stateType在a2");
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(5.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
         jlog(@"5s delay done, applying hooks...");

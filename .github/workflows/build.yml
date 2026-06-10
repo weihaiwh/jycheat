@@ -1,4 +1,4 @@
-name: Build JYJH NoCDNoEnergy Dylib (v12.6)
+name: Build JYJH NoCDNoEnergy Dylib (v12.7)
 
 on:
   push:
@@ -130,20 +130,20 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JYJH-NoCDNoEnergy-dylib-v12.6
+          name: JYJH-NoCDNoEnergy-dylib-v12.7
           path: output/
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v12.6
+          tag_name: v12.7
           files: output/*
           body: |
-            ## 剑影江湖 v12.6 - 区分普通技能/大招 + CD修复
-            - CheckSkillIsReady/CheckSkillAttackCanUse区分普通技能(1-4)和大招(5-6)
-            - 大招返回true需要同时满足忽略解锁+大招无CD, 避免卡死
-            - 去掉get_IsUnlock/get_IsAnger(同地址, hook冲突)
-            - ExSkillData.LastTriggerTime偏移0x20(dump.cs确认)
-            - 伤害上限: 最大30000, 默认100
+            ## 剑影江湖 v12.7 - 大招不卡死 + 怒气加满
+            - CheckSkillIsReady对大招不返回true(防卡死), 普通技能正常
+            - CheckSkillAttackCanUse对大招保留原逻辑, 普通技能直接true
+            - IsExSkillInCD hook加满怒气: 设置ExSkillData.Data(0x18)为极大值
+            - CheckSkillUnlock的stateType在a2(第三个参数), 修正参数映射
+            - ExSkillData.Data(0x18)=怒气值, 设置极大值可跳过怒气检查
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
