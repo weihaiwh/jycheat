@@ -113,14 +113,15 @@ static const int ESD_SKILLS = 0x18;      // skills (UInt64) 实际偏移=0x28-0x
 // Hook函数指针
 // ============================================================
 
-typedef BOOL (*BoolFunc4)(void*, int, int, int);
+typedef BOOL (*BoolFunc3)(void*, int, int);  // 3参数函数(CheckSkillUnlock, IsExSkillInCD)
+typedef BOOL (*BoolFunc4)(void*, int, int, int);  // 4参数函数(CheckSkillAttackCanUse, CheckSkillIsReady, CanUseExSkill)
 typedef int  (*IntFunc1)(void*);
 
 static void *g_funcCanUse = NULL;          static BoolFunc4 g_origCanUse = NULL;          static BOOL g_cdHooked = NO;
 static void *g_funcIsReady = NULL;         static BoolFunc4 g_origIsReady = NULL;         static BOOL g_energyHooked = NO;
-static void *g_funcCheckSkillUnlock = NULL; static BoolFunc4 g_origCheckSkillUnlock = NULL; static BOOL g_skillUnlockHooked = NO;
-static void *g_funcCanUseExSkill = NULL;   static BoolFunc4 g_origCanUseExSkill = NULL;   static BOOL g_canUseExSkillHooked = NO;
-static void *g_funcIsExSkillInCD = NULL;   static BoolFunc4 g_origIsExSkillInCD = NULL;   static BOOL g_isExSkillInCDHooked = NO;
+static void *g_funcCheckSkillUnlock = NULL; static BoolFunc3 g_origCheckSkillUnlock = NULL; static BOOL g_skillUnlockHooked = NO;
+static void *g_funcCanUseExSkill = NULL;   static BoolFunc3 g_origCanUseExSkill = NULL;   static BOOL g_canUseExSkillHooked = NO;
+static void *g_funcIsExSkillInCD = NULL;   static BoolFunc3 g_origIsExSkillInCD = NULL;   static BOOL g_isExSkillInCDHooked = NO;
 static void *g_funcLimitDmg = NULL;        static IntFunc1 g_origLimitDmg = NULL;         static BOOL g_limitHooked = NO;
 
 // ============================================================
@@ -231,40 +232,39 @@ static BOOL hookIsReady(void *self, int a1, int a2, int a3) {
 
 /**
  * [3] 忽略解锁: CheckSkillUnlock → true
- * 签名: (Frame, CharacterFiled*, CharacterStateType)
- * ARM64映射: self=x0=Frame*, a1=x1=characterField*, a2=x2=stateType, a3=x3(unused)
+ * 签名: (Frame, CharacterFiled*, CharacterStateType) - 3个参数!
+ * ARM64映射: self=x0=Frame*, a1=x1=characterField*, a2=x2=stateType
  * 注意: stateType在a2(第三个参数)!
  *
  * 解锁是UI层检查, 不涉及帧同步, 可以安全返回true
  */
 static int g_unlockLogCount = 0;
-static BOOL hookCheckSkillUnlock(void *self, int a1, int a2, int a3) {
+static BOOL hookCheckSkillUnlock(void *self, int a1, int a2) {
     if (g_ignoreUnlock) {
-        // 调试日志: 前10次记录参数
         if (g_unlockLogCount < 10) {
             g_unlockLogCount++;
             jlog(@"Unlock[%d]: a1=%d a2=%d (stateType在a2)", g_unlockLogCount, a1, a2);
         }
         return YES;
     }
-    if (g_origCheckSkillUnlock) return g_origCheckSkillUnlock(self, a1, a2, a3);
+    if (g_origCheckSkillUnlock) return g_origCheckSkillUnlock(self, a1, a2);
     return YES;
 }
 
 /**
  * [4] 大招可用: CanUseExSkill → true
- * 签名: (Int64 customParam, Int32 usedTimesPack, Int32 exSkillIdx)
+ * 签名: (Int64 customParam, Int32 usedTimesPack, Int32 exSkillIdx) - 3个参数!
  * 这个检查的是使用次数, 不涉及帧同步状态, 可以安全返回true
  */
-static BOOL hookCanUseExSkill(void *self, int a1, int a2, int a3) {
+static BOOL hookCanUseExSkill(void *self, int a1, int a2) {
     if (g_exSkillAvail) return YES;
-    if (g_origCanUseExSkill) return g_origCanUseExSkill(self, a1, a2, a3);
+    if (g_origCanUseExSkill) return g_origCanUseExSkill(self, a1, a2);
     return YES;
 }
 
 /**
  * [5] 大招无CD+无限怒气: IsExSkillInCD
- * 签名: (FP now, ExSkillData* skillp, ExSkillInfo info)
+ * 签名: (FP now, ExSkillData* skillp, ExSkillInfo info) - 3个参数!
  * ARM64映射: self=x0=now(FP), a1=x1=ExSkillData*, a2=x2=ExSkillInfo
  *
  * 策略: 修改ExSkillData底层数据让大招可用
@@ -277,7 +277,7 @@ static BOOL hookCanUseExSkill(void *self, int a1, int a2, int a3) {
  *   如果偏移错误, 日志中的内存dump会帮助判断
  */
 static int g_exSkillLogCount = 0;  // 限制日志输出次数
-static BOOL hookIsExSkillInCD(void *self, int a1, int a2, int a3) {
+static BOOL hookIsExSkillInCD(void *self, int a1, int a2) {
     if (g_exSkillNoCD) {
         void *skillpData = (void*)(uintptr_t)a1;
         if (skillpData) {
@@ -321,7 +321,7 @@ static BOOL hookIsExSkillInCD(void *self, int a1, int a2, int a3) {
         }
         return NO; // 不在CD
     }
-    if (g_origIsExSkillInCD) return g_origIsExSkillInCD(self, a1, a2, a3);
+    if (g_origIsExSkillInCD) return g_origIsExSkillInCD(self, a1, a2);
     return NO;
 }
 
@@ -451,15 +451,16 @@ static void hookOneFunc(void *funcAddr, void *hookFunc, void **origFunc, BOOL *h
 static void applyAllHooks(void) {
     if (!g_funcCanUse) findIL2CPP();
 
-    // 所有hook一开始就全部安装, 开关只控制hook函数内部逻辑
-    hookOneFunc(g_funcCanUse, hookCanUse, (void**)&g_origCanUse, &g_cdHooked, "1.无CD");
-    hookOneFunc(g_funcIsReady, hookIsReady, (void**)&g_origIsReady, &g_energyHooked, "2.无能量");
-    hookOneFunc(g_funcCheckSkillUnlock, hookCheckSkillUnlock, (void**)&g_origCheckSkillUnlock, &g_skillUnlockHooked, "3.忽略解锁");
-    hookOneFunc(g_funcCanUseExSkill, hookCanUseExSkill, (void**)&g_origCanUseExSkill, &g_canUseExSkillHooked, "4.大招可用");
-    hookOneFunc(g_funcIsExSkillInCD, hookIsExSkillInCD, (void**)&g_origIsExSkillInCD, &g_isExSkillInCDHooked, "5.大招无CD");
+    // 只hook已开启的功能, 未开启的不安装hook (避免Dobby跳转指令影响帧同步性能)
+    if (g_noCD) hookOneFunc(g_funcCanUse, hookCanUse, (void**)&g_origCanUse, &g_cdHooked, "1.无CD");
+    if (g_noEnergy) hookOneFunc(g_funcIsReady, hookIsReady, (void**)&g_origIsReady, &g_energyHooked, "2.无能量");
+    if (g_ignoreUnlock) hookOneFunc(g_funcCheckSkillUnlock, hookCheckSkillUnlock, (void**)&g_origCheckSkillUnlock, &g_skillUnlockHooked, "3.忽略解锁");
+    if (g_exSkillAvail) hookOneFunc(g_funcCanUseExSkill, hookCanUseExSkill, (void**)&g_origCanUseExSkill, &g_canUseExSkillHooked, "4.大招可用");
+    if (g_exSkillNoCD) hookOneFunc(g_funcIsExSkillInCD, hookIsExSkillInCD, (void**)&g_origIsExSkillInCD, &g_isExSkillInCDHooked, "5.大招无CD");
     hookOneFunc(g_funcLimitDmg, hookLimitDmg, (void**)&g_origLimitDmg, &g_limitHooked, "6.伤害上限");
 
-    jlog(@"applyAllHooks done (v13.0 - 数据修改策略: 修改底层数据让原函数自己返回正确值)");
+    jlog(@"applyAllHooks done (v13.0 - 数据修改策略) hooked: CD=%d Energy=%d Unlock=%d ExAvail=%d ExNoCD=%d Limit=%d",
+         g_cdHooked, g_energyHooked, g_skillUnlockHooked, g_canUseExSkillHooked, g_isExSkillInCDHooked, g_limitHooked);
 }
 
 // ============================================================
@@ -519,11 +520,46 @@ static void togglePanel(UIView *bv) {
 @end
 @implementation JYJHActionHandler
 + (instancetype)shared { static JYJHActionHandler *s; static dispatch_once_t o; dispatch_once(&o,^{s=[[self alloc]init];}); return s; }
-- (void)onNoCD { g_noCD=!g_noCD; refreshButtons(); jlog(@"Toggle 无CD: %d", g_noCD); }
-- (void)onNoEnergy { g_noEnergy=!g_noEnergy; refreshButtons(); jlog(@"Toggle 无能量: %d", g_noEnergy); }
-- (void)onIgnoreUnlock { g_ignoreUnlock=!g_ignoreUnlock; refreshButtons(); jlog(@"Toggle 忽略解锁: %d", g_ignoreUnlock); }
-- (void)onExSkillAvail { g_exSkillAvail=!g_exSkillAvail; refreshButtons(); jlog(@"Toggle 大招可用: %d", g_exSkillAvail); }
-- (void)onExSkillNoCD { g_exSkillNoCD=!g_exSkillNoCD; refreshButtons(); jlog(@"Toggle 大招无CD: %d", g_exSkillNoCD); }
+- (void)onNoCD {
+    g_noCD=!g_noCD;
+    if (g_noCD && !g_cdHooked) {
+        findIL2CPP();
+        hookOneFunc(g_funcCanUse, hookCanUse, (void**)&g_origCanUse, &g_cdHooked, "1.无CD");
+    }
+    refreshButtons(); jlog(@"Toggle 无CD: %d hooked=%d", g_noCD, g_cdHooked);
+}
+- (void)onNoEnergy {
+    g_noEnergy=!g_noEnergy;
+    if (g_noEnergy && !g_energyHooked) {
+        findIL2CPP();
+        hookOneFunc(g_funcIsReady, hookIsReady, (void**)&g_origIsReady, &g_energyHooked, "2.无能量");
+    }
+    refreshButtons(); jlog(@"Toggle 无能量: %d hooked=%d", g_noEnergy, g_energyHooked);
+}
+- (void)onIgnoreUnlock {
+    g_ignoreUnlock=!g_ignoreUnlock;
+    if (g_ignoreUnlock && !g_skillUnlockHooked) {
+        findIL2CPP();
+        hookOneFunc(g_funcCheckSkillUnlock, hookCheckSkillUnlock, (void**)&g_origCheckSkillUnlock, &g_skillUnlockHooked, "3.忽略解锁");
+    }
+    refreshButtons(); jlog(@"Toggle 忽略解锁: %d hooked=%d", g_ignoreUnlock, g_skillUnlockHooked);
+}
+- (void)onExSkillAvail {
+    g_exSkillAvail=!g_exSkillAvail;
+    if (g_exSkillAvail && !g_canUseExSkillHooked) {
+        findIL2CPP();
+        hookOneFunc(g_funcCanUseExSkill, hookCanUseExSkill, (void**)&g_origCanUseExSkill, &g_canUseExSkillHooked, "4.大招可用");
+    }
+    refreshButtons(); jlog(@"Toggle 大招可用: %d hooked=%d", g_exSkillAvail, g_canUseExSkillHooked);
+}
+- (void)onExSkillNoCD {
+    g_exSkillNoCD=!g_exSkillNoCD;
+    if (g_exSkillNoCD && !g_isExSkillInCDHooked) {
+        findIL2CPP();
+        hookOneFunc(g_funcIsExSkillInCD, hookIsExSkillInCD, (void**)&g_origIsExSkillInCD, &g_isExSkillInCDHooked, "5.大招无CD");
+    }
+    refreshButtons(); jlog(@"Toggle 大招无CD: %d hooked=%d", g_exSkillNoCD, g_isExSkillInCDHooked);
+}
 - (void)sliderChanged:(UISlider *)s {
     g_damageLimit=(int)s.value;
     g_sliderLabel.text=[NSString stringWithFormat:@"\u4f24\u5bb3\u4e0a\u9650: %d",g_damageLimit];
@@ -626,9 +662,8 @@ static void initialize(void) {
     jlog(@"========== JYJH v13.0 (数据修改策略) ==========");
     jlog(@"iOS %@", [[UIDevice currentDevice] systemVersion]);
     jlog(@"Bundle %@", [[NSBundle mainBundle] bundleIdentifier]);
-    jlog(@"v13.0: 不再强制返回true! 改为修改底层数据让原函数自己返回正确值");
-    jlog(@"  无CD/无能量: 清除SkillStateData.CoolDown+恢复Count, 然后调原函数");
-    jlog(@"  大招: 修改ExSkillData.lv=30 + Data(怒气)=极大值 + LastTriggerTime=0");
+    jlog(@"v13.0: 惰性hook - 只在用户开启开关时才安装hook");
+    jlog(@"  启动时只安装伤害上限hook, 其余在用户点击按钮时按需安装");
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(5.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
         jlog(@"5s delay done, applying hooks...");
