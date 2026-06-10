@@ -1,4 +1,4 @@
-name: Build JYJH NoCD NoEnergy Dylib (v12.2)
+name: Build JYJH NoCD NoEnergy Dylib (v12.3)
 
 on:
   push:
@@ -92,7 +92,7 @@ jobs:
             -fobjc-arc \
             -I. \
             -c JYJH_NoCDNoEnergy_v12.m \
-            -o JYJH_NoCDNoEnergy.o 2>&1 || { echo "COMPILE FAILED!"; exit 1; }
+            -o JYJH_NoCDNoEnergy.o
           
           echo "Compile OK, linking with Dobby..."
           
@@ -113,9 +113,12 @@ jobs:
             -install_name @executable_path/JYJH_NoCDNoEnergy.dylib \
             -o JYJH_NoCDNoEnergy.dylib \
             JYJH_NoCDNoEnergy.o \
-            "$DOBBY_LIB" 2>&1 || { echo "LINK FAILED!"; exit 1; }
+            "$DOBBY_LIB"
           
           echo "Build SUCCESS!"
+          
+          file JYJH_NoCDNoEnergy.dylib
+          ls -lh JYJH_NoCDNoEnergy.dylib
 
       - name: Sign and package
         run: |
@@ -131,18 +134,20 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JYJH_NoCDNoEnergy-dylib
+          name: JYJH-NoCDNoEnergy-dylib-v12.3
           path: output/
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v12.2
+          tag_name: v12.3
           files: output/*
           body: |
-            ## 剑影江湖 v12.2 - CalcBufferDamage移除, limitDamage生效
+            ## 剑影江湖 v12.3 - 反汇编修正版
             - ✅ 无CD + 无能量 + 无限怒气 + 伤害上限
-            - v12.2: 移除CalcBufferDamage hook (10参数cctools交叉编译失败)
+            - v12.3: 基于UnityFramework反汇编修正参数签名
+            - 移除: SkillModel.CheckSkill(dump.cs中不存在), OnAngerChange(UI回调无效)
+            - CalcBufferDamage: 仅搜索记录地址, 不hook (10参数cctools编译失败)
             - 伤害上限通过 get_limitDamage hook 实现
             - 保留: CheckSkillUnlock + CanUseExSkill + IsExSkillInCD hook
         env:
