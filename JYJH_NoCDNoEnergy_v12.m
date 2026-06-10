@@ -99,10 +99,13 @@ static BoolFunc4 g_origIsExSkillInCD = NULL;
 static BOOL g_isExSkillInCDHooked = NO;
 
 // CalcBufferDamage(Frame, CharacterFiled* attackerCf, DestroyedEntityData, CharacterFiled* defCf,
-//                  ref UInt32& hurtFlag, ref Int64& wuxingDmg, SkillDamageType, Int64 damage, Int32 hurtRate, Int32 skillButton)
+//                  ref UInt32& hurtFlag, ref Int64& wuxingDmg, Int64 damage, Int32 skillButton, ...)
 // ★attackerCf(x1)和defCf(x3)可以区分攻击者!
+// ARM64 calling convention: 10 params → x0-x7 + 栈上2个
+// 所有指针/Int64占8字节, Int32占4字节, IL2CPP中Int32可能被扩展为64位
 static void *g_funcCalcBufferDamage = NULL;
-typedef int64_t (*CalcDmgFunc)(void*, void*, int64_t, void*, void*, void*, int, int64_t, int, int);
+// 简化签名: 10个8字节参数(ARM64 ABI下所有参数都对齐到8字节)
+typedef int64_t (*CalcDmgFunc)(void*, void*, void*, void*, void*, void*, int64_t, int64_t, int64_t, int64_t);
 static CalcDmgFunc g_origCalcBufferDamage = NULL;
 static BOOL g_calcBufferDmgHooked = NO;
 
@@ -170,31 +173,26 @@ static BOOL hookIsExSkillInCD(void *self, int a1, int a2, int a3) {
  * 签名: Int64 CalcBufferDamage(Frame, CharacterFiled* attackerCf, DestroyedEntityData,
  *                               CharacterFiled* defCf, ref UInt32& hurtFlag, ref Int64& wuxingDmg,
  *                               SkillDamageType, Int64 damage, Int32 hurtRate, Int32 skillButton)
- * ARM64寄存器: x0=Frame, x1=attackerCf, x2=DestroyedEntityData, x3=defCf,
- *              x4=hurtFlag&, x5=wuxingDmg&, x6=dmgType, x7=damage
- *              栈: hurtRate, skillButton
+ * ARM64寄存器: x0-x7传8个参数, 栈传剩余2个
+ * 所有参数在ARM64 ABI下对齐到8字节
+ * ★attackerCf(x1)和defCf(x3)可以区分攻击者!
  * 
  * 策略: 判断attackerCf是否是玩家, 如果是则应用伤害上限
  *   如何判断是否是玩家: CharacterFiled有IsPlayerOrMonster方法
  *   但最简单的方式: 直接用limitDamage替换damage参数
  */
-static int64_t hookCalcBufferDamage(void *frame, void *attackerCf, int64_t destroyedEData,
+static int64_t hookCalcBufferDamage(void *frame, void *attackerCf, void *destroyedEData,
                                     void *defCf, void *hurtFlag, void *wuxingDmg,
-                                    int dmgType, int64_t damage, int hurtRate, int skillButton) {
+                                    int64_t p7, int64_t p8, int64_t p9, int64_t p10) {
     // 调用原始函数
     int64_t result = 0;
     if (g_origCalcBufferDamage) {
         result = g_origCalcBufferDamage(frame, attackerCf, destroyedEData, defCf,
-                                         hurtFlag, wuxingDmg, dmgType, damage, hurtRate, skillButton);
+                                         hurtFlag, wuxingDmg, p7, p8, p9, p10);
     }
     
     // 只在有攻击者时修改伤害 (attackerCf非空 = 有攻击者)
-    // 对于怪物攻击玩家, attackerCf是怪物的CharacterFiled*
-    // 对于玩家攻击怪物, attackerCf是玩家的CharacterFiled*
-    // 目前简单策略: 只要有攻击者就应用伤害上限
-    // TODO: 后续可以判断attackerCf是否是本地玩家角色
     if (g_damageLimit > 0 && attackerCf != NULL) {
-        // 记录一次日志 (避免刷屏)
         static int logCount = 0;
         if (logCount < 5) {
             jlog(@"CalcBufferDamage: atk=%p def=%p orig=%lld → %d", attackerCf, defCf, result, g_damageLimit);
