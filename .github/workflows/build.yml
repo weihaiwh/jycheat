@@ -1,4 +1,4 @@
-name: Build JYJH NoCDNoEnergy Dylib (v12.7)
+name: Build JYJH NoCDNoEnergy Dylib (v13.0)
 
 on:
   push:
@@ -77,8 +77,8 @@ jobs:
           which arm-apple-darwin11-clang || { echo "ERROR: clang not found!"; ls "$TOOLCHAIN/bin/" | head -20; exit 1; }
           ls -la "$DOBBY_LIB" || { echo "ERROR: Dobby lib not found!"; exit 1; }
           echo "=== Source file ==="
-          ls -la JYJH_NoCDNoEnergy_v12.m
-          head -5 JYJH_NoCDNoEnergy_v12.m
+          ls -la JYJH_NoCDNoEnergy_v13.m
+          head -5 JYJH_NoCDNoEnergy_v13.m
           
           echo "=== Compiling ==="
           arm-apple-darwin11-clang \
@@ -87,7 +87,7 @@ jobs:
             -isysroot "$SDK" \
             -fobjc-arc \
             -I. \
-            -c JYJH_NoCDNoEnergy_v12.m \
+            -c JYJH_NoCDNoEnergy_v13.m \
             -o JYJH_NoCDNoEnergy.o
           
           echo "Compile OK, linking with Dobby..."
@@ -130,20 +130,22 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JYJH-NoCDNoEnergy-dylib-v12.7
+          name: JYJH-NoCDNoEnergy-dylib-v13.0
           path: output/
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v12.7
+          tag_name: v13.0
           files: output/*
           body: |
-            ## 剑影江湖 v12.7 - 大招不卡死 + 怒气加满
-            - CheckSkillIsReady对大招不返回true(防卡死), 普通技能正常
-            - CheckSkillAttackCanUse对大招保留原逻辑, 普通技能直接true
-            - IsExSkillInCD hook加满怒气: 设置ExSkillData.Data(0x18)为极大值
-            - CheckSkillUnlock的stateType在a2(第三个参数), 修正参数映射
-            - ExSkillData.Data(0x18)=怒气值, 设置极大值可跳过怒气检查
+            ## 剑影江湖 v13.0 - 修改底层数据策略(防卡死)
+            - **核心策略变更**: 不再强制返回true/false, 改为修改底层数据让原函数自己判断
+            - 无CD: 清除SkillStateData.CoolDown字段(0x18), 让CheckSkillIsReady原函数自己返回true
+            - 无能量: 清除SkillStateData.CoolDown+UsedTimes(0x13), 同时恢复Count(0x14)=CountMax(0x16)
+            - 忽略解锁: CheckSkillUnlock仍返回true(解锁是UI层检查, 不影响帧同步)
+            - 大招可用: CanUseExSkill仍返回true(使用次数检查, 不影响帧同步)
+            - 大招无CD+怒气: IsExSkillInCD中修改ExSkillData.Data(0x18)=极大怒气+ExSkillData.lv(0x10)=30+清除LastTriggerTime
+            - **不会卡死**: 所有帧同步检查函数都调用原函数, 原函数根据修改后的数据自己判断
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
