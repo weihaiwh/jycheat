@@ -1,4 +1,4 @@
-name: Build JYJH NoCDNoEnergy Dylib (v13.0)
+name: Build JYJH NoCDNoEnergy Dylib (v14.0)
 
 on:
   push:
@@ -77,8 +77,8 @@ jobs:
           which arm-apple-darwin11-clang || { echo "ERROR: clang not found!"; ls "$TOOLCHAIN/bin/" | head -20; exit 1; }
           ls -la "$DOBBY_LIB" || { echo "ERROR: Dobby lib not found!"; exit 1; }
           echo "=== Source file ==="
-          ls -la JYJH_NoCDNoEnergy_v13.m
-          head -5 JYJH_NoCDNoEnergy_v13.m
+          ls -la JYJH_NoCDNoEnergy_v14.m
+          head -5 JYJH_NoCDNoEnergy_v14.m
           
           echo "=== Compiling ==="
           arm-apple-darwin11-clang \
@@ -87,7 +87,7 @@ jobs:
             -isysroot "$SDK" \
             -fobjc-arc \
             -I. \
-            -c JYJH_NoCDNoEnergy_v13.m \
+            -c JYJH_NoCDNoEnergy_v14.m \
             -o JYJH_NoCDNoEnergy.o
           
           echo "Compile OK, linking with Dobby..."
@@ -130,22 +130,23 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JYJH-NoCDNoEnergy-dylib-v13.0
+          name: JYJH-NoCDNoEnergy-dylib-v14.0
           path: output/
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v13.0
+          tag_name: v14.0
           files: output/*
           body: |
-            ## 剑影江湖 v13.0 - 修改底层数据策略(防卡死)
-            - **核心策略变更**: 不再强制返回true/false, 改为修改底层数据让原函数自己判断
-            - 无CD: 清除SkillStateData.CoolDown字段(0x18), 让CheckSkillIsReady原函数自己返回true
-            - 无能量: 清除SkillStateData.CoolDown+UsedTimes(0x13), 同时恢复Count(0x14)=CountMax(0x16)
-            - 忽略解锁: CheckSkillUnlock仍返回true(解锁是UI层检查, 不影响帧同步)
-            - 大招可用: CanUseExSkill仍返回true(使用次数检查, 不影响帧同步)
-            - 大招无CD+怒气: IsExSkillInCD中修改ExSkillData.Data(0x18)=极大怒气+ExSkillData.lv(0x10)=30+清除LastTriggerTime
-            - **不会卡死**: 所有帧同步检查函数都调用原函数, 原函数根据修改后的数据自己判断
+            ## 剑影江湖 v14.0 - 安全hook策略(彻底修复卡死)
+            - **核心变更**: 完全不hook帧同步关键路径函数(CheckSkillAttackCanUse/CheckSkillIsReady)
+            - 这两个函数是帧同步引擎每帧调用的核心决策函数, Dobby inline hook的跳转指令会导致帧同步超时卡死
+            - 即使hook函数只调用原函数, 跳转本身也会导致卡死!
+            - 只保留4个安全hook: 忽略解锁/大招可用/大招无CD+怒气/伤害上限
+            - 忽略解锁已验证: 对20级普通技能有效, 能用且无CD
+            - 大招无CD+怒气: 修改ExSkillData数据(等级=30/怒气=满/CD=0)
+            - 去掉"无CD"和"无能量"按钮(无法通过hook实现)
+            - UI: 3个按钮 + 伤害滑块
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
