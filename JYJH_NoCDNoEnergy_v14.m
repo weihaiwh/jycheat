@@ -134,14 +134,20 @@ static BOOL hookCanUseExSkill(void *self, int a1, int a2) {
  */
 static int g_exSkillLogCount = 0;
 static BOOL hookIsExSkillInCD(void *self, int a1, int a2) {
+    // 无条件日志: 确认此hook是否被调用(不看开关, 每次都记录)
+    if (g_exSkillLogCount < 10) {
+        g_exSkillLogCount++;
+        jlog(@"IsExSkillInCD[%d] called! self=%p a1=%p a2=%p exNoCD=%d",
+             g_exSkillLogCount, self, (void*)(uintptr_t)a1, (void*)(uintptr_t)a2, g_exSkillNoCD);
+    }
+
     if (g_exSkillNoCD) {
         void *skillpData = (void*)(uintptr_t)a1;
         if (skillpData) {
-            // 调试: 前5次dump内存
-            if (g_exSkillLogCount < 5) {
-                g_exSkillLogCount++;
+            // dump内存(前5次)
+            if (g_exSkillLogCount <= 5) {
                 uint8_t *p = (uint8_t*)skillpData;
-                jlog(@"ExSkillData DUMP[%d] ptr=%p:", g_exSkillLogCount, skillpData);
+                jlog(@"ExSkillData DUMP ptr=%p:", skillpData);
                 jlog(@"  +00: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x",
                      p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7],
                      p[8],p[9],p[10],p[11],p[12],p[13],p[14],p[15]);
@@ -157,20 +163,19 @@ static BOOL hookIsExSkillInCD(void *self, int a1, int a2) {
                      *(uint64_t*)(p+0x18), *(uint64_t*)(p+0x20));
             }
 
-            // 修改ExSkillData
-            // 1. lv=30 (解决"等级不够")
-            *(int16_t*)((uint8_t*)skillpData + ESD_LV) = 30;
-            // 2. Data=FP极大值 (怒气满)
-            uint64_t *dataVal = (uint64_t*)((uint8_t*)skillpData + ESD_DATA);
-            *dataVal = (uint64_t)10000 << 16;  // FP(10000)
-            // 3. LastTriggerTime=0 (CD已过)
-            uint64_t *ltt = (uint64_t*)((uint8_t*)skillpData + ESD_LASTTRIGGERTIME);
-            *ltt = 0;
+            // 修改ExSkillData (两种偏移方案都写, 确保至少一种命中)
+            // 方案A: 无header偏移
+            *(int16_t*)((uint8_t*)skillpData + 0x00) = 30;     // lv=30
+            *(uint64_t*)((uint8_t*)skillpData + 0x08) = (uint64_t)10000 << 16; // Data=FP(10000)
+            *(uint64_t*)((uint8_t*)skillpData + 0x10) = 0;     // LastTriggerTime=0
+            // 方案B: 有header偏移(dump.cs原偏移)
+            *(int16_t*)((uint8_t*)skillpData + 0x10) = 30;     // lv=30
+            *(uint64_t*)((uint8_t*)skillpData + 0x18) = (uint64_t)10000 << 16; // Data=FP(10000)
+            *(uint64_t*)((uint8_t*)skillpData + 0x20) = 0;     // LastTriggerTime=0
 
-            jlog(@"ExSkill SET: lv=%d id=%d Data=0x%llx LTT=0x%llx",
-                 *(int16_t*)((uint8_t*)skillpData + ESD_LV),
-                 *(int32_t*)((uint8_t*)skillpData + ESD_ID),
-                 *dataVal, *ltt);
+            jlog(@"ExSkill SET(双方案): A:lv=%d B:lv=%d",
+                 *(int16_t*)((uint8_t*)skillpData + 0x00),
+                 *(int16_t*)((uint8_t*)skillpData + 0x10));
         }
         return NO; // 不在CD
     }
