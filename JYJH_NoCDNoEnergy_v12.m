@@ -1,21 +1,26 @@
 /**
- * 剑影江湖 v12.3 - 精确方法Hook (基于UnityFramework反汇编修正)
- * 
- * v12.0: 所有9个方法都找到了! 但大招仍不能释放
- * v12.1/v12.2: 尝试修正参数签名, 但CalcBufferDamage(10参数)导致cctools编译失败
- * 
- * v12.3策略: 恢复v12.0能编译通过的源码, 做最小改动:
- *   1. 移除SkillModel.CheckSkill (dump.cs中不存在)
- *   2. 移除OnAngerChange hook (UI回调, 非逻辑函数)
- *   3. CalcBufferDamage只搜索不hook (10参数cctools编译失败)
- *   4. 伤害上限通过 get_limitDamage hook 实现 (已验证有效)
- *   5. CheckSkillUnlock/CanUseExSkill/IsExSkillInCD用BoolFunc4 (ARM64 ABI忽略多余参数)
- * 
- * UnityFramework反汇编确认的签名:
- *   CheckSkillUnlock(Frame, CharacterFiled*, CharacterStateType) → 3参数
- *   CanUseExSkill(Int64, Int32, Int32) → 3参数, 无栈帧
- *   IsExSkillInCD(FP, ExSkillData*, ExSkillInfo) → 3参数
- *   CalcBufferDamage: 10参数, 704字节栈帧
+ * 剑影江湖 v12.4 - 6个独立Hook + 大招CD修复
+ *
+ * v12.3问题:
+ *   1. 3个按钮共用g_noAnger, 大招仍不能释放
+ *   2. TriggerExSkill内部有独立CD检查(不经过IsExSkillInCD)
+ *
+ * v12.4修复:
+ *   1. 6个独立开关: 无CD/无能量/忽略解锁/大招可用/大招无CD/伤害上限
+ *   2. hookIsExSkillInCD中清除ExSkillData.lastTriggerTime(offset 0x10)
+ *      → TriggerExSkill内部的CD检查: elapsed = now - lastTriggerTime
+ *      → lastTriggerTime=0 → elapsed极大 → CD检查自然通过
+ *   3. 伤害滑块: 最大30000, 默认100
+ *
+ * 反汇编确认的调用链:
+ *   CheckSkillIsReady → CheckSkillUnlock (Skill5/Skill6等级+解锁)
+ *   TryTriggerExSkill → TriggerExSkill (内部CD检查@0x30b8f74)
+ *   TriggerExSkill → IsExSkillInCD (外部CD检查)
+ *   CanUseExSkill (使用次数检查)
+ *
+ * ExSkillData结构(反汇编确认):
+ *   offset 0x10: lastTriggerTime (Int64)
+ *   offset 0x58: cdDuration (Int32, 秒)
  */
 
 #import <mach-o/dyld.h>
@@ -51,97 +56,133 @@ static void jlog(NSString *fmt, ...) {
 }
 
 // ============================================================
-// 全局状态
+// 全局状态 - 6个独立开关
 // ============================================================
 
-static BOOL g_noCD = YES;
-static BOOL g_noEnergy = YES;
-static BOOL g_noAnger = YES;
-static int g_damageLimit = 10000;
+static BOOL g_noCD = YES;           // 1. 无CD (CheckSkillAttackCanUse)
+static BOOL g_noEnergy = YES;       // 2. 无能量 (CheckSkillIsReady)
+static BOOL g_ignoreUnlock = YES;   // 3. 忽略解锁 (CheckSkillUnlock)
+static BOOL g_exSkillAvail = YES;   // 4. 大招可用 (CanUseExSkill)
+static BOOL g_exSkillNoCD = YES;    // 5. 大招无CD (IsExSkillInCD + 清除lastTriggerTime)
+static int g_damageLimit = 100;     // 6. 伤害上限 (get_limitDamage)
 
-// Primary hooks
-static void *g_funcCanUse = NULL;
-static void *g_funcIsReady = NULL;
-static void *g_funcLimitDmg = NULL;
+// ============================================================
+// Hook函数指针和原始函数
+// ============================================================
 
 typedef BOOL (*BoolFunc4)(void*, int, int, int);
+typedef int  (*IntFunc1)(void*);
+
+// 1. CheckSkillAttackCanUse(Frame, CharacterStateType, CharacterFiled*, CharacterStatesAsset)
+static void *g_funcCanUse = NULL;
 static BoolFunc4 g_origCanUse = NULL;
-static BoolFunc4 g_origIsReady = NULL;
-typedef int (*IntFunc1)(void*);
-static IntFunc1 g_origLimitDmg = NULL;
-
 static BOOL g_cdHooked = NO;
-static BOOL g_energyHooked = NO;
-static BOOL g_limitHooked = NO;
 
-// v12.3: 精确hook (基于UnityFramework反汇编确认)
-// CheckSkillUnlock: 3参数, 用BoolFunc4(ARM64 ABI忽略多余参数)
+// 2. CheckSkillIsReady(Frame, CharacterStateType, CharacterFiled*, CharacterStatesAsset)
+static void *g_funcIsReady = NULL;
+static BoolFunc4 g_origIsReady = NULL;
+static BOOL g_energyHooked = NO;
+
+// 3. CheckSkillUnlock(Frame, CharacterFiled*, CharacterStateType)
 static void *g_funcCheckSkillUnlock = NULL;
 static BoolFunc4 g_origCheckSkillUnlock = NULL;
 static BOOL g_skillUnlockHooked = NO;
 
-// CanUseExSkill: 3参数(Int64,Int32,Int32), 用BoolFunc4
+// 4. CanUseExSkill(Int64, Int32, Int32)
 static void *g_funcCanUseExSkill = NULL;
 static BoolFunc4 g_origCanUseExSkill = NULL;
 static BOOL g_canUseExSkillHooked = NO;
 
-// IsExSkillInCD: 3参数, 用BoolFunc4
+// 5. IsExSkillInCD(FP, ExSkillData*, ExSkillInfo)
 static void *g_funcIsExSkillInCD = NULL;
 static BoolFunc4 g_origIsExSkillInCD = NULL;
 static BOOL g_isExSkillInCDHooked = NO;
 
-// CalcBufferDamage: 10参数, 只搜索不hook (cctools交叉编译10参数函数失败)
+// 6. get_limitDamage
+static void *g_funcLimitDmg = NULL;
+static IntFunc1 g_origLimitDmg = NULL;
+static BOOL g_limitHooked = NO;
+
+// CalcBufferDamage: 只搜索不hook (10参数cctools编译失败)
 static void *g_funcCalcBufferDamage = NULL;
-static BOOL g_calcBufferDmgHooked = NO;
-
-// UI
-static UIView *g_panel = nil;
-static UIButton *g_btnCD = nil;
-static UIButton *g_btnEnergy = nil;
-static UIButton *g_btnAnger = nil;
-static UISlider *g_slider = nil;
-static UILabel *g_sliderLabel = nil;
-static BOOL g_panelOpen = NO;
 
 // ============================================================
-// Hook函数
+// Hook函数实现
 // ============================================================
 
+/** 1. 无CD: CheckSkillAttackCanUse → true */
 static BOOL hookCanUse(void *self, int a1, int a2, int a3) {
     if (g_noCD) return YES;
     if (g_origCanUse) return g_origCanUse(self, a1, a2, a3);
     return YES;
 }
 
+/** 2. 无能量: CheckSkillIsReady → true */
 static BOOL hookIsReady(void *self, int a1, int a2, int a3) {
     if (g_noEnergy) return YES;
     if (g_origIsReady) return g_origIsReady(self, a1, a2, a3);
     return YES;
 }
 
-static int hookLimitDmg(void *self) {
-    return g_damageLimit;
-}
-
-/** CheckSkillUnlock(Frame, CharacterFiled*, CharacterStateType) → true (忽略30级解锁) */
+/** 3. 忽略解锁: CheckSkillUnlock → true (忽略30级等解锁条件) */
 static BOOL hookCheckSkillUnlock(void *self, int a1, int a2, int a3) {
-    if (g_noAnger) return YES;
+    if (g_ignoreUnlock) return YES;
     if (g_origCheckSkillUnlock) return g_origCheckSkillUnlock(self, a1, a2, a3);
     return YES;
 }
 
-/** CanUseExSkill(Int64, Int32, Int32) → true (大招可用) */
+/** 4. 大招可用: CanUseExSkill → true (使用次数不限) */
 static BOOL hookCanUseExSkill(void *self, int a1, int a2, int a3) {
-    if (g_noAnger) return YES;
+    if (g_exSkillAvail) return YES;
     if (g_origCanUseExSkill) return g_origCanUseExSkill(self, a1, a2, a3);
     return YES;
 }
 
-/** IsExSkillInCD(FP, ExSkillData*, ExSkillInfo) → false (大招不在CD) */
+/**
+ * 5. 大招无CD: IsExSkillInCD → false + 清除lastTriggerTime
+ *
+ * 关键修复: 反汇编发现TriggerExSkill内部(0x30b8f74)有独立CD检查:
+ *   ldr w8, [x20, #0x58]    // cdDuration
+ *   ldr x9, [x23, #0x10]    // lastTriggerTime
+ *   sub x9, x26, x9          // elapsed = now - lastTriggerTime
+ *   cmp x9, x8, lsl #16
+ *   b.lt fail
+ *
+ * 即使hook IsExSkillInCD返回false, TriggerExSkill仍会因内部CD检查而失败。
+ * 解决: 在返回false之前, 把ExSkillData.lastTriggerTime(offset 0x10)清零,
+ * 这样TriggerExSkill内部计算 elapsed = now - 0 = 极大值 >> CD, 检查自然通过。
+ */
 static BOOL hookIsExSkillInCD(void *self, int a1, int a2, int a3) {
-    if (g_noAnger) return NO;
+    if (g_exSkillNoCD) {
+        // 清除ExSkillData.lastTriggerTime, 绕过TriggerExSkill内部CD检查
+        // IsExSkillInCD(FP now, ExSkillData* skillp, ExSkillInfo info)
+        // ARM64调用约定: x0=now(FP值), x1=skillp指针, x2=info
+        // self在BoolFunc4中对应x0, a1对应x1, a2对应x2, a3对应x3
+        // 但这里self=x0=now(FP值), a1=x1=ExSkillData*
+        // ExSkillData->lastTriggerTime在offset 0x10
+        void *skillpData = (void*)(uintptr_t)a1;
+        if (skillpData) {
+            // 安全写入: 清除lastTriggerTime让TriggerExSkill内部CD检查也通过
+            // offset 0x10是lastTriggerTime (Int64, 8字节)
+            uint64_t *ltt = (uint64_t*)((uint8_t*)skillpData + 0x10);
+            vm_protect_t oldProt;
+            kern_return_t kr = vm_protect(mach_task_self(), (vm_address_t)ltt, 8, NO, VM_PROT_READ|VM_PROT_WRITE|VM_PROT_COPY);
+            if (kr == KERN_SUCCESS || kr == KERN_INVALID_ARGUMENT) {
+                *ltt = 0;
+                jlog(@"ExSkillCD: cleared lastTriggerTime at %p+0x10", skillpData);
+            } else {
+                jlog(@"ExSkillCD: vm_protect failed kr=%d for %p+0x10", kr, skillpData);
+            }
+        }
+        return NO; // 不在CD
+    }
     if (g_origIsExSkillInCD) return g_origIsExSkillInCD(self, a1, a2, a3);
     return NO;
+}
+
+/** 6. 伤害上限: get_limitDamage → g_damageLimit */
+static int hookLimitDmg(void *self) {
+    return g_damageLimit;
 }
 
 // ============================================================
@@ -159,15 +200,15 @@ typedef uint32_t (*Il2CppMethodGetParamCount)(void*);
 typedef const char* (*Il2CppClassGetName)(void*);
 
 // ============================================================
-// 查找IL2CPP方法 (v12: 精确方法名匹配)
+// 查找IL2CPP方法
 // ============================================================
 
 static void findIL2CPP(void) {
-    jlog(@"=== v12.0 IL2CPP Runtime Search (精确匹配) ===");
-    
+    jlog(@"=== v12.4 IL2CPP Runtime Search ===");
+
     void *h = dlopen(NULL, RTLD_LAZY);
     if (!h) { jlog(@"dlopen FAIL"); return; }
-    
+
     Il2CppDomainGet domain_get = dlsym(h, "il2cpp_domain_get");
     Il2CppDomainGetAssemblies get_assemblies = dlsym(h, "il2cpp_domain_get_assemblies");
     Il2CppAssemblyGetImage get_image = dlsym(h, "il2cpp_assembly_get_image");
@@ -177,79 +218,78 @@ static void findIL2CPP(void) {
     Il2CppMethodGetName method_name = dlsym(h, "il2cpp_method_get_name");
     Il2CppMethodGetParamCount param_count = dlsym(h, "il2cpp_method_get_param_count");
     Il2CppClassGetName class_name_func = dlsym(h, "il2cpp_class_get_name");
-    
+
     if (!domain_get || !method_name) { jlog(@"IL2CPP APIs not found"); return; }
-    
+
     void *domain = domain_get();
     if (!domain) return;
-    
+
     size_t assemCount = 0;
     void **assemblies = get_assemblies(domain, &assemCount);
     if (!assemblies) return;
-    
+
     jlog(@"assemblies=%p count=%zu", assemblies, assemCount);
-    
+
     int found = 0;
     int totalMethods = 0;
-    
+
     for (size_t a = 0; a < assemCount; a++) {
         void *img = get_image(assemblies[a]);
         if (!img) continue;
         size_t cnt = class_count ? class_count(img) : 0;
-        
+
         for (size_t c = 0; c < cnt; c++) {
             void *klass = get_class(img, c);
             if (!klass) continue;
             const char *cn = class_name_func ? class_name_func(klass) : NULL;
-            
+
             void *iter = NULL;
             void *m = NULL;
             while ((m = get_methods(klass, &iter)) != NULL) {
                 totalMethods++;
                 const char *n = method_name(m);
                 if (!n) continue;
-                
+
                 uint32_t pc = param_count ? param_count(m) : 0;
                 void *funcAddr = NULL;
                 memcpy(&funcAddr, m, sizeof(void*));
-                
+
                 if (strcmp(n, "CheckSkillAttackCanUse") == 0 && !g_funcCanUse) {
-                    jlog(@"FOUND %s.CheckSkillAttackCanUse params=%u addr=%p", cn ?: "?", pc, funcAddr);
+                    jlog(@"FOUND %s.CheckSkillAttackCanUse params=%u addr=%p [无CD]", cn ?: "?", pc, funcAddr);
                     g_funcCanUse = funcAddr; found++;
                 }
                 else if (strcmp(n, "CheckSkillIsReady") == 0 && !g_funcIsReady) {
-                    jlog(@"FOUND %s.CheckSkillIsReady params=%u addr=%p", cn ?: "?", pc, funcAddr);
+                    jlog(@"FOUND %s.CheckSkillIsReady params=%u addr=%p [无能量]", cn ?: "?", pc, funcAddr);
                     g_funcIsReady = funcAddr; found++;
                 }
                 else if (strcmp(n, "CheckSkillUnlock") == 0 && !g_funcCheckSkillUnlock) {
-                    jlog(@"FOUND %s.CheckSkillUnlock params=%u addr=%p ★级别解锁", cn ?: "?", pc, funcAddr);
+                    jlog(@"FOUND %s.CheckSkillUnlock params=%u addr=%p [忽略解锁]", cn ?: "?", pc, funcAddr);
                     g_funcCheckSkillUnlock = funcAddr; found++;
                 }
-                else if (strcmp(n, "get_limitDamage") == 0 && !g_funcLimitDmg) {
-                    jlog(@"FOUND %s.get_limitDamage params=%u addr=%p", cn ?: "?", pc, funcAddr);
-                    g_funcLimitDmg = funcAddr; found++;
-                }
                 else if (strcmp(n, "CanUseExSkill") == 0 && !g_funcCanUseExSkill) {
-                    jlog(@"FOUND %s.CanUseExSkill params=%u addr=%p ★大招可用", cn ?: "?", pc, funcAddr);
+                    jlog(@"FOUND %s.CanUseExSkill params=%u addr=%p [大招可用]", cn ?: "?", pc, funcAddr);
                     g_funcCanUseExSkill = funcAddr; found++;
                 }
                 else if (strcmp(n, "IsExSkillInCD") == 0 && !g_funcIsExSkillInCD) {
-                    jlog(@"FOUND %s.IsExSkillInCD params=%u addr=%p ★大招CD", cn ?: "?", pc, funcAddr);
+                    jlog(@"FOUND %s.IsExSkillInCD params=%u addr=%p [大招无CD]", cn ?: "?", pc, funcAddr);
                     g_funcIsExSkillInCD = funcAddr; found++;
                 }
-                // CalcBufferDamage: 只搜索记录, 不hook (10参数cctools编译失败)
+                else if (strcmp(n, "get_limitDamage") == 0 && !g_funcLimitDmg) {
+                    jlog(@"FOUND %s.get_limitDamage params=%u addr=%p [伤害上限]", cn ?: "?", pc, funcAddr);
+                    g_funcLimitDmg = funcAddr; found++;
+                }
                 else if (strcmp(n, "CalcBufferDamage") == 0 && !g_funcCalcBufferDamage) {
-                    jlog(@"FOUND %s.CalcBufferDamage params=%u addr=%p ★伤害(仅搜索)", cn ?: "?", pc, funcAddr);
+                    jlog(@"FOUND %s.CalcBufferDamage params=%u addr=%p (仅搜索)", cn ?: "?", pc, funcAddr);
                     g_funcCalcBufferDamage = funcAddr; found++;
                 }
             }
         }
     }
-    
+
     jlog(@"Scanned %d methods, found %d targets", totalMethods, found);
-    jlog(@"Primary: CanUse=%p IsReady=%p LimitDmg=%p", g_funcCanUse, g_funcIsReady, g_funcLimitDmg);
-    jlog(@"v12.3: CheckSkillUnlock=%p CanUseExSkill=%p IsExSkillInCD=%p CalcBufferDamage=%p(仅搜索)",
-         g_funcCheckSkillUnlock, g_funcCanUseExSkill, g_funcIsExSkillInCD, g_funcCalcBufferDamage);
+    jlog(@"[1]CanUse=%p [2]IsReady=%p [3]CheckSkillUnlock=%p", g_funcCanUse, g_funcIsReady, g_funcCheckSkillUnlock);
+    jlog(@"[4]CanUseExSkill=%p [5]IsExSkillInCD=%p [6]LimitDmg=%p", g_funcCanUseExSkill, g_funcIsExSkillInCD, g_funcLimitDmg);
+    jlog(@"CalcBufferDamage=%p (仅搜索)", g_funcCalcBufferDamage);
 }
 
 // ============================================================
@@ -259,7 +299,7 @@ static void findIL2CPP(void) {
 static void hookOneFunc(void *funcAddr, void *hookFunc, void **origFunc, BOOL *hookedFlag, const char *name) {
     if (!funcAddr) { jlog(@"%s: funcAddr not found, skip", name); return; }
     if (*hookedFlag) { jlog(@"%s: already hooked", name); return; }
-    
+
     int ret = DobbyHook(funcAddr, hookFunc, origFunc);
     if (ret == 0) {
         *hookedFlag = YES;
@@ -271,44 +311,62 @@ static void hookOneFunc(void *funcAddr, void *hookFunc, void **origFunc, BOOL *h
 
 static void applyAllHooks(void) {
     if (!g_funcCanUse) findIL2CPP();
-    
-    // Primary hooks
-    if (g_noCD) hookOneFunc(g_funcCanUse, hookCanUse, (void**)&g_origCanUse, &g_cdHooked, "CanUse");
-    if (g_noEnergy) hookOneFunc(g_funcIsReady, hookIsReady, (void**)&g_origIsReady, &g_energyHooked, "IsReady");
-    hookOneFunc(g_funcLimitDmg, hookLimitDmg, (void**)&g_origLimitDmg, &g_limitHooked, "LimitDmg");
-    
-    // v12.3: 精确hook (基于UnityFramework反汇编确认)
-    if (g_noAnger) {
-        hookOneFunc(g_funcCheckSkillUnlock, hookCheckSkillUnlock, (void**)&g_origCheckSkillUnlock, &g_skillUnlockHooked, "CheckSkillUnlock★");
-        hookOneFunc(g_funcCanUseExSkill, hookCanUseExSkill, (void**)&g_origCanUseExSkill, &g_canUseExSkillHooked, "CanUseExSkill★");
-        hookOneFunc(g_funcIsExSkillInCD, hookIsExSkillInCD, (void**)&g_origIsExSkillInCD, &g_isExSkillInCDHooked, "IsExSkillInCD★");
-    }
-    
-    // CalcBufferDamage: 只搜索记录地址, 不hook (10参数cctools编译失败)
+
+    // 1. 无CD
+    if (g_noCD) hookOneFunc(g_funcCanUse, hookCanUse, (void**)&g_origCanUse, &g_cdHooked, "1.无CD");
+    // 2. 无能量
+    if (g_noEnergy) hookOneFunc(g_funcIsReady, hookIsReady, (void**)&g_origIsReady, &g_energyHooked, "2.无能量");
+    // 3. 忽略解锁
+    if (g_ignoreUnlock) hookOneFunc(g_funcCheckSkillUnlock, hookCheckSkillUnlock, (void**)&g_origCheckSkillUnlock, &g_skillUnlockHooked, "3.忽略解锁");
+    // 4. 大招可用
+    if (g_exSkillAvail) hookOneFunc(g_funcCanUseExSkill, hookCanUseExSkill, (void**)&g_origCanUseExSkill, &g_canUseExSkillHooked, "4.大招可用");
+    // 5. 大招无CD
+    if (g_exSkillNoCD) hookOneFunc(g_funcIsExSkillInCD, hookIsExSkillInCD, (void**)&g_origIsExSkillInCD, &g_isExSkillInCDHooked, "5.大招无CD");
+    // 6. 伤害上限 (始终hook)
+    hookOneFunc(g_funcLimitDmg, hookLimitDmg, (void**)&g_origLimitDmg, &g_limitHooked, "6.伤害上限");
+
     if (g_funcCalcBufferDamage) {
         jlog(@"CalcBufferDamage found at %p (仅搜索, 不hook)", g_funcCalcBufferDamage);
     }
-    
-    jlog(@"applyAllHooks done (v12.3 - 反汇编修正)");
+
+    jlog(@"applyAllHooks done (v12.4 - 6个独立Hook + 大招CD修复)");
 }
 
 // ============================================================
-// UI
+// UI - 6个独立按钮
 // ============================================================
 
+static UIView *g_panel = nil;
+static UIButton *g_btnNoCD = nil;
+static UIButton *g_btnNoEnergy = nil;
+static UIButton *g_btnIgnoreUnlock = nil;
+static UIButton *g_btnExSkillAvail = nil;
+static UIButton *g_btnExSkillNoCD = nil;
+static UISlider *g_slider = nil;
+static UILabel *g_sliderLabel = nil;
+static BOOL g_panelOpen = NO;
+
 static void refreshButtons(void) {
-    [g_btnCD setTitle: g_noCD ? @"\U00002705 \u65e0CD: \u5f00" : @"\U0000274c \u65e0CD: \u5173" forState:UIControlStateNormal];
-    g_btnCD.backgroundColor = g_noCD ? [UIColor colorWithRed:0.15 green:0.75 blue:0.15 alpha:0.95] : [UIColor colorWithRed:0.7 green:0.15 blue:0.15 alpha:0.95];
-    [g_btnEnergy setTitle: g_noEnergy ? @"\U00002705 \u65e0\u80fd\u91cf: \u5f00" : @"\U0000274c \u65e0\u80fd\u91cf: \u5173" forState:UIControlStateNormal];
-    g_btnEnergy.backgroundColor = g_noEnergy ? [UIColor colorWithRed:0.15 green:0.75 blue:0.15 alpha:0.95] : [UIColor colorWithRed:0.7 green:0.15 blue:0.15 alpha:0.95];
-    [g_btnAnger setTitle: g_noAnger ? @"\U00002705 \u65e0\u9650\u6012\u6c14: \u5f00" : @"\U0000274c \u65e0\u9650\u6012\u6c14: \u5173" forState:UIControlStateNormal];
-    g_btnAnger.backgroundColor = g_noAnger ? [UIColor colorWithRed:0.15 green:0.75 blue:0.15 alpha:0.95] : [UIColor colorWithRed:0.7 green:0.15 blue:0.15 alpha:0.95];
+    [g_btnNoCD setTitle: g_noCD ? @"\U00002705 \u65e0CD" : @"\U0000274c \u65e0CD" forState:UIControlStateNormal];
+    g_btnNoCD.backgroundColor = g_noCD ? [UIColor colorWithRed:0.15 green:0.75 blue:0.15 alpha:0.95] : [UIColor colorWithRed:0.7 green:0.15 blue:0.15 alpha:0.95];
+
+    [g_btnNoEnergy setTitle: g_noEnergy ? @"\U00002705 \u65e0\u80fd\u91cf" : @"\U0000274c \u65e0\u80fd\u91cf" forState:UIControlStateNormal];
+    g_btnNoEnergy.backgroundColor = g_noEnergy ? [UIColor colorWithRed:0.15 green:0.75 blue:0.15 alpha:0.95] : [UIColor colorWithRed:0.7 green:0.15 blue:0.15 alpha:0.95];
+
+    [g_btnIgnoreUnlock setTitle: g_ignoreUnlock ? @"\U00002705 \u5ffd\u7565\u89e3\u9501" : @"\U0000274c \u5ffd\u7565\u89e3\u9501" forState:UIControlStateNormal];
+    g_btnIgnoreUnlock.backgroundColor = g_ignoreUnlock ? [UIColor colorWithRed:0.15 green:0.75 blue:0.15 alpha:0.95] : [UIColor colorWithRed:0.7 green:0.15 blue:0.15 alpha:0.95];
+
+    [g_btnExSkillAvail setTitle: g_exSkillAvail ? @"\U00002705 \u5927\u62db\u53ef\u7528" : @"\U0000274c \u5927\u62db\u53ef\u7528" forState:UIControlStateNormal];
+    g_btnExSkillAvail.backgroundColor = g_exSkillAvail ? [UIColor colorWithRed:0.15 green:0.75 blue:0.15 alpha:0.95] : [UIColor colorWithRed:0.7 green:0.15 blue:0.15 alpha:0.95];
+
+    [g_btnExSkillNoCD setTitle: g_exSkillNoCD ? @"\U00002705 \u5927\u62db\u65e0CD" : @"\U0000274c \u5927\u62db\u65e0CD" forState:UIControlStateNormal];
+    g_btnExSkillNoCD.backgroundColor = g_exSkillNoCD ? [UIColor colorWithRed:0.15 green:0.75 blue:0.15 alpha:0.95] : [UIColor colorWithRed:0.7 green:0.15 blue:0.15 alpha:0.95];
 }
 
 static void layoutPanel(UIView *bv) {
     if (!bv || !g_panel) return;
     CGRect bf=bv.frame, sc=[UIScreen mainScreen].bounds;
-    CGFloat pw=260, ph=440;
+    CGFloat pw=260, ph=520;
     CGFloat px=bf.origin.x-pw-8; if(px<4)px=bf.origin.x+bf.size.width+8;
     CGFloat py=bf.origin.y+bf.size.height/2-ph/2;
     if(py<4)py=4; if(py+ph>sc.size.height-4)py=sc.size.height-ph-4;
@@ -322,24 +380,34 @@ static void togglePanel(UIView *bv) {
 
 @interface JYJHActionHandler : NSObject
 + (instancetype)shared;
-- (void)onCD;
-- (void)onEnergy;
-- (void)onAnger;
+- (void)onNoCD;
+- (void)onNoEnergy;
+- (void)onIgnoreUnlock;
+- (void)onExSkillAvail;
+- (void)onExSkillNoCD;
 - (void)sliderChanged:(UISlider *)slider;
 @end
 @implementation JYJHActionHandler
 + (instancetype)shared { static JYJHActionHandler *s; static dispatch_once_t o; dispatch_once(&o,^{s=[[self alloc]init];}); return s; }
-- (void)onCD {
+- (void)onNoCD {
     g_noCD=!g_noCD; refreshButtons();
-    jlog(@"Toggle CD: %d", g_noCD);
+    jlog(@"Toggle 无CD: %d (CheckSkillAttackCanUse)", g_noCD);
 }
-- (void)onEnergy {
+- (void)onNoEnergy {
     g_noEnergy=!g_noEnergy; refreshButtons();
-    jlog(@"Toggle Energy: %d", g_noEnergy);
+    jlog(@"Toggle 无能量: %d (CheckSkillIsReady)", g_noEnergy);
 }
-- (void)onAnger {
-    g_noAnger=!g_noAnger; refreshButtons();
-    jlog(@"Toggle Anger: %d (CheckSkillUnlock+CanUseExSkill+IsExSkillInCD)", g_noAnger);
+- (void)onIgnoreUnlock {
+    g_ignoreUnlock=!g_ignoreUnlock; refreshButtons();
+    jlog(@"Toggle 忽略解锁: %d (CheckSkillUnlock)", g_ignoreUnlock);
+}
+- (void)onExSkillAvail {
+    g_exSkillAvail=!g_exSkillAvail; refreshButtons();
+    jlog(@"Toggle 大招可用: %d (CanUseExSkill)", g_exSkillAvail);
+}
+- (void)onExSkillNoCD {
+    g_exSkillNoCD=!g_exSkillNoCD; refreshButtons();
+    jlog(@"Toggle 大招无CD: %d (IsExSkillInCD+清除CD)", g_exSkillNoCD);
 }
 - (void)sliderChanged:(UISlider *)s {
     g_damageLimit=(int)s.value;
@@ -387,27 +455,55 @@ static void setupUI(void) {
     UIWindow *win = getKeyWindow();
     if (!win) { dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{setupUI();}); return; }
     JYJHBallView *ball = [[JYJHBallView alloc] init]; [win addSubview:ball];
-    g_panel=[[UIView alloc]initWithFrame:CGRectMake(0,0,260,440)];
+
+    CGFloat pw=260, ph=520;
+    g_panel=[[UIView alloc]initWithFrame:CGRectMake(0,0,pw,ph)];
     g_panel.backgroundColor=[UIColor colorWithRed:0.08 green:0.08 blue:0.12 alpha:0.98];
     g_panel.layer.cornerRadius=14; g_panel.hidden=YES; [win addSubview:g_panel];
-    UILabel *title=[[UILabel alloc]initWithFrame:CGRectMake(0,10,260,24)];
-    title.text=@"\u5251\u5f71\u6c5f\u6e56 v12.3"; title.textColor=[UIColor cyanColor];
-    title.font=[UIFont boldSystemFontOfSize:15]; title.textAlignment=NSTextAlignmentCenter; [g_panel addSubview:title];
-    g_btnCD=[UIButton buttonWithType:UIButtonTypeCustom]; g_btnCD.frame=CGRectMake(16,42,228,36);
-    g_btnCD.layer.cornerRadius=8; [g_btnCD addTarget:[JYJHActionHandler shared] action:@selector(onCD) forControlEvents:UIControlEventTouchUpInside]; [g_panel addSubview:g_btnCD];
-    g_btnEnergy=[UIButton buttonWithType:UIButtonTypeCustom]; g_btnEnergy.frame=CGRectMake(16,84,228,36);
-    g_btnEnergy.layer.cornerRadius=8; [g_btnEnergy addTarget:[JYJHActionHandler shared] action:@selector(onEnergy) forControlEvents:UIControlEventTouchUpInside]; [g_panel addSubview:g_btnEnergy];
-    g_btnAnger=[UIButton buttonWithType:UIButtonTypeCustom]; g_btnAnger.frame=CGRectMake(16,126,228,36);
-    g_btnAnger.layer.cornerRadius=8; [g_btnAnger addTarget:[JYJHActionHandler shared] action:@selector(onAnger) forControlEvents:UIControlEventTouchUpInside]; [g_panel addSubview:g_btnAnger];
-    g_sliderLabel=[[UILabel alloc]initWithFrame:CGRectMake(16,170,228,20)];
-    g_sliderLabel.text=[NSString stringWithFormat:@"\u4f24\u5bb3\u4e0a\u9650: %d", g_damageLimit]; g_sliderLabel.textColor=[UIColor whiteColor];
-    g_sliderLabel.font=[UIFont systemFontOfSize:13]; [g_panel addSubview:g_sliderLabel];
-    g_slider=[[UISlider alloc]initWithFrame:CGRectMake(16,192,228,28)];
-    g_slider.minimumValue=100; g_slider.maximumValue=10000; g_slider.value=g_damageLimit;
+
+    // 标题
+    UILabel *title=[[UILabel alloc]initWithFrame:CGRectMake(0,8,pw,22)];
+    title.text=@"\u5251\u5f71\u6c5f\u6e56 v12.4"; title.textColor=[UIColor cyanColor];
+    title.font=[UIFont boldSystemFontOfSize:14]; title.textAlignment=NSTextAlignmentCenter; [g_panel addSubview:title];
+
+    // 5个按钮: y从36开始, 间距36
+    CGFloat bx=16, bw=228, bh=32, by0=34, bdy=36;
+    g_btnNoCD=[UIButton buttonWithType:UIButtonTypeCustom]; g_btnNoCD.frame=CGRectMake(bx,by0,bw,bh);
+    g_btnNoCD.layer.cornerRadius=8; g_btnNoCD.titleLabel.font=[UIFont boldSystemFontOfSize:13];
+    [g_btnNoCD addTarget:[JYJHActionHandler shared] action:@selector(onNoCD) forControlEvents:UIControlEventTouchUpInside]; [g_panel addSubview:g_btnNoCD];
+
+    g_btnNoEnergy=[UIButton buttonWithType:UIButtonTypeCustom]; g_btnNoEnergy.frame=CGRectMake(bx,by0+bdy,bw,bh);
+    g_btnNoEnergy.layer.cornerRadius=8; g_btnNoEnergy.titleLabel.font=[UIFont boldSystemFontOfSize:13];
+    [g_btnNoEnergy addTarget:[JYJHActionHandler shared] action:@selector(onNoEnergy) forControlEvents:UIControlEventTouchUpInside]; [g_panel addSubview:g_btnNoEnergy];
+
+    g_btnIgnoreUnlock=[UIButton buttonWithType:UIButtonTypeCustom]; g_btnIgnoreUnlock.frame=CGRectMake(bx,by0+bdy*2,bw,bh);
+    g_btnIgnoreUnlock.layer.cornerRadius=8; g_btnIgnoreUnlock.titleLabel.font=[UIFont boldSystemFontOfSize:13];
+    [g_btnIgnoreUnlock addTarget:[JYJHActionHandler shared] action:@selector(onIgnoreUnlock) forControlEvents:UIControlEventTouchUpInside]; [g_panel addSubview:g_btnIgnoreUnlock];
+
+    g_btnExSkillAvail=[UIButton buttonWithType.CustomButton]; g_btnExSkillAvail.frame=CGRectMake(bx,by0+bdy*3,bw,bh);
+    g_btnExSkillAvail.layer.cornerRadius=8; g_btnExSkillAvail.titleLabel.font=[UIFont boldSystemFontOfSize:13];
+    [g_btnExSkillAvail addTarget:[JYJHActionHandler shared] action:@selector(onExSkillAvail) forControlEvents:UIControlEventTouchUpInside]; [g_panel addSubview:g_btnExSkillAvail];
+
+    g_btnExSkillNoCD=[UIButton buttonWithType:UIButtonTypeCustom]; g_btnExSkillNoCD.frame=CGRectMake(bx,by0+bdy*4,bw,bh);
+    g_btnExSkillNoCD.layer.cornerRadius=8; g_btnExSkillNoCD.titleLabel.font=[UIFont boldSystemFontOfSize:13];
+    [g_btnExSkillNoCD addTarget:[JYJHActionHandler shared] action:@selector(onExSkillNoCD) forControlEvents:UIControlEventTouchUpInside]; [g_panel addSubview:g_btnExSkillNoCD];
+
+    // 伤害滑块: 在5个按钮之后
+    CGFloat sy = by0 + bdy*5 + 4;
+    g_sliderLabel=[[UILabel alloc]initWithFrame:CGRectMake(bx,sy,bw,18)];
+    g_sliderLabel.text=[NSString stringWithFormat:@"\u4f24\u5bb3\u4e0a\u9650: %d", g_damageLimit];
+    g_sliderLabel.textColor=[UIColor whiteColor]; g_sliderLabel.font=[UIFont systemFontOfSize:12]; [g_panel addSubview:g_sliderLabel];
+
+    g_slider=[[UISlider alloc]initWithFrame:CGRectMake(bx,sy+20,bw,28)];
+    g_slider.minimumValue=100; g_slider.maximumValue=30000; g_slider.value=g_damageLimit;
     [g_slider addTarget:[JYJHActionHandler shared] action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged]; [g_panel addSubview:g_slider];
-    g_debugLabel=[[UILabel alloc]initWithFrame:CGRectMake(8,228,244,200)];
+
+    // 调试日志
+    CGFloat dy = sy + 52;
+    g_debugLabel=[[UILabel alloc]initWithFrame:CGRectMake(8,dy,pw-16,ph-dy-4)];
     g_debugLabel.textColor=[UIColor colorWithRed:0.2 green:1.0 blue:0.2 alpha:1.0];
-    g_debugLabel.font=[UIFont fontWithName:@"Menlo" size:10]; g_debugLabel.numberOfLines=0; [g_panel addSubview:g_debugLabel];
+    g_debugLabel.font=[UIFont fontWithName:@"Menlo" size:9]; g_debugLabel.numberOfLines=0; [g_panel addSubview:g_debugLabel];
+
     refreshButtons();
 }
 
@@ -420,17 +516,17 @@ static void initialize(void) {
     static BOOL loaded = NO;
     if (loaded) { jlog(@"Already loaded, skip"); return; }
     loaded = YES;
-    
+
     g_debugLines=[NSMutableArray new];
-    jlog(@"========== JYJH v12.3 (反汇编修正, CalcBufferDamage仅搜索) ==========");
+    jlog(@"========== JYJH v12.4 (6独立Hook + 大招CD修复) ==========");
     jlog(@"iOS %@", [[UIDevice currentDevice] systemVersion]);
     jlog(@"Bundle %@", [[NSBundle mainBundle] bundleIdentifier]);
-    jlog(@"v12.3: CheckSkillUnlock + CanUseExSkill + IsExSkillInCD + limitDamage");
-    
+    jlog(@"v12.4: 无CD/无能量/忽略解锁/大招可用/大招无CD(清除lastTriggerTime)/伤害上限");
+
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(5.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
         jlog(@"5s delay done, applying hooks...");
         applyAllHooks();
-        
+
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
             setupUI();
         });

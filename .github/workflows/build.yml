@@ -1,4 +1,4 @@
-name: Build JYJH NoCD NoEnergy Dylib (v12.3)
+name: Build JYJH NoCD NoEnergy Dylib (v12.4)
 
 on:
   push:
@@ -38,10 +38,8 @@ jobs:
           export PATH="$TOOLCHAIN/bin:$PATH"
           SDK="$TOOLCHAIN/SDK/iPhoneOS15.6.sdk"
           
-          # Clone Dobby source
           git clone https://github.com/jmpews/Dobby.git --depth 1 /tmp/dobby
           
-          # Create toolchain file for cmake cross-compilation
           cat > /tmp/ios-toolchain.cmake << 'EOF'
           set(CMAKE_SYSTEM_NAME Darwin)
           set(CMAKE_SYSTEM_PROCESSOR arm64)
@@ -52,7 +50,6 @@ jobs:
           set(CMAKE_FIND_ROOT_PATH MODE_INCLUDE ONLY)
           EOF
           
-          # Build Dobby as static library
           mkdir -p /tmp/dobby/build && cd /tmp/dobby/build
           cmake .. \
             -DCMAKE_TOOLCHAIN_FILE=/tmp/ios-toolchain.cmake \
@@ -64,7 +61,6 @@ jobs:
           
           ninja -j$(nproc)
           
-          # Verify the static library was built
           find /tmp/dobby/build -name "*.a" -ls
           echo "DOBBY_LIB=$(find /tmp/dobby/build -name 'libdobby.a' | head -1)" >> $GITHUB_ENV
 
@@ -134,21 +130,19 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JYJH-NoCDNoEnergy-dylib-v12.3
+          name: JYJH-NoCDNoEnergy-dylib-v12.4
           path: output/
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v12.3
+          tag_name: v12.4
           files: output/*
           body: |
-            ## 剑影江湖 v12.3 - 反汇编修正版
-            - ✅ 无CD + 无能量 + 无限怒气 + 伤害上限
-            - v12.3: 基于UnityFramework反汇编修正参数签名
-            - 移除: SkillModel.CheckSkill(dump.cs中不存在), OnAngerChange(UI回调无效)
-            - CalcBufferDamage: 仅搜索记录地址, 不hook (10参数cctools编译失败)
-            - 伤害上限通过 get_limitDamage hook 实现
-            - 保留: CheckSkillUnlock + CanUseExSkill + IsExSkillInCD hook
+            ## 剑影江湖 v12.4 - 6独立Hook + 大招CD修复
+            - 6个独立开关: 无CD/无能量/忽略解锁/大招可用/大招无CD/伤害上限
+            - 大招CD修复: hookIsExSkillInCD中清除ExSkillData.lastTriggerTime
+            - TriggerExSkill内部独立CD检查也能被绕过
+            - 伤害上限: 最大30000, 默认100
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
