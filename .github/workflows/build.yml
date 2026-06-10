@@ -75,14 +75,16 @@ jobs:
           SDK="$TOOLCHAIN/SDK/iPhoneOS15.6.sdk"
           DOBBY_LIB="${DOBBY_LIB:-/tmp/dobby/build/libdobby.a}"
           
+          echo "=== Build Environment ==="
           echo "SDK: $SDK"
           echo "DOBBY_LIB: $DOBBY_LIB"
+          which arm-apple-darwin11-clang || { echo "ERROR: clang not found!"; ls "$TOOLCHAIN/bin/" | head -20; exit 1; }
+          ls -la "$DOBBY_LIB" || { echo "ERROR: Dobby lib not found!"; exit 1; }
+          echo "=== Source file ==="
+          ls -la JYJH_NoCDNoEnergy_v12.m
+          head -5 JYJH_NoCDNoEnergy_v12.m
           
-          # Verify files exist
-          ls -la "$DOBBY_LIB" || { echo "Dobby lib not found!"; exit 1; }
-          
-          # Compile .m -> .o (include dobby.h from project root)
-          ## v12.2: CalcBufferDamage 10参数hook移除, 伤害通过limitDamage实现
+          echo "=== Compiling ==="
           arm-apple-darwin11-clang \
             -arch arm64 \
             -miphoneos-version-min=15.0 \
@@ -90,11 +92,10 @@ jobs:
             -fobjc-arc \
             -I. \
             -c JYJH_NoCDNoEnergy_v12.m \
-            -o JYJH_NoCDNoEnergy.o
+            -o JYJH_NoCDNoEnergy.o 2>&1 || { echo "COMPILE FAILED!"; exit 1; }
           
           echo "Compile OK, linking with Dobby..."
           
-          # Link with cctools ld + Dobby static library
           arm-apple-darwin11-ld \
             -arch arm64 \
             -iphoneos_version_min 15.0 \
@@ -112,7 +113,9 @@ jobs:
             -install_name @executable_path/JYJH_NoCDNoEnergy.dylib \
             -o JYJH_NoCDNoEnergy.dylib \
             JYJH_NoCDNoEnergy.o \
-            "$DOBBY_LIB"
+            "$DOBBY_LIB" 2>&1 || { echo "LINK FAILED!"; exit 1; }
+          
+          echo "Build SUCCESS!"
 
       - name: Sign and package
         run: |
