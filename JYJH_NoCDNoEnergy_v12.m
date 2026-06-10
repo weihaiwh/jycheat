@@ -162,17 +162,11 @@ static BOOL hookIsExSkillInCD(void *self, int a1, int a2, int a3) {
         // ExSkillData->lastTriggerTime在offset 0x10
         void *skillpData = (void*)(uintptr_t)a1;
         if (skillpData) {
-            // 安全写入: 清除lastTriggerTime让TriggerExSkill内部CD检查也通过
+            // ExSkillData由IL2CPP在GC堆上分配, 内存本身可写
             // offset 0x10是lastTriggerTime (Int64, 8字节)
             uint64_t *ltt = (uint64_t*)((uint8_t*)skillpData + 0x10);
-            vm_protect_t oldProt;
-            kern_return_t kr = vm_protect(mach_task_self(), (vm_address_t)ltt, 8, NO, VM_PROT_READ|VM_PROT_WRITE|VM_PROT_COPY);
-            if (kr == KERN_SUCCESS || kr == KERN_INVALID_ARGUMENT) {
-                *ltt = 0;
-                jlog(@"ExSkillCD: cleared lastTriggerTime at %p+0x10", skillpData);
-            } else {
-                jlog(@"ExSkillCD: vm_protect failed kr=%d for %p+0x10", kr, skillpData);
-            }
+            *ltt = 0;
+            jlog(@"ExSkillCD: cleared lastTriggerTime at %p+0x10", skillpData);
         }
         return NO; // 不在CD
     }
@@ -480,7 +474,7 @@ static void setupUI(void) {
     g_btnIgnoreUnlock.layer.cornerRadius=8; g_btnIgnoreUnlock.titleLabel.font=[UIFont boldSystemFontOfSize:13];
     [g_btnIgnoreUnlock addTarget:[JYJHActionHandler shared] action:@selector(onIgnoreUnlock) forControlEvents:UIControlEventTouchUpInside]; [g_panel addSubview:g_btnIgnoreUnlock];
 
-    g_btnExSkillAvail=[UIButton buttonWithType.CustomButton]; g_btnExSkillAvail.frame=CGRectMake(bx,by0+bdy*3,bw,bh);
+    g_btnExSkillAvail=[UIButton buttonWithType:UIButtonTypeCustom]; g_btnExSkillAvail.frame=CGRectMake(bx,by0+bdy*3,bw,bh);
     g_btnExSkillAvail.layer.cornerRadius=8; g_btnExSkillAvail.titleLabel.font=[UIFont boldSystemFontOfSize:13];
     [g_btnExSkillAvail addTarget:[JYJHActionHandler shared] action:@selector(onExSkillAvail) forControlEvents:UIControlEventTouchUpInside]; [g_panel addSubview:g_btnExSkillAvail];
 
