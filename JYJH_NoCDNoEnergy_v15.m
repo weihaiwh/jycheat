@@ -1,5 +1,5 @@
 /**
- * 剑影江湖 v15.0 - TryTriggerExSkill hook策略
+ * 剑影江湖 v15.1 - TryTriggerExSkill hook策略(修复数据访问)
  *
  * v14.0日志关键发现:
  *   IsExSkillInCD hook虽然DobbyHook成功, 但从未被调用!
@@ -201,23 +201,33 @@ static BOOL hookIsExSkillInCD(void *self, int a1, int a2) {
  * ARM64: x0=Frame*, x1=type(UInt64), x2=trigger, x3=fuse, x4=targets,
  *        x5=CharacterFiled*, x6=asset, x7=triggerData
  *
- * 策略: 在大招触发检查前, 修改ExSkillData.Data为极大值(怒气满)
- *        然后调原函数, 原函数检查怒气时会发现怒气已满, 允许释放
+ * v15.0日志发现:
+ *   - TryTriggerExSkill确实被调用! type=1024(Skill6), character有效
+ *   - CharacterFiled+0x28的ExSkillDatasPtr.Offset = 0
+ *     说明ExSkillDatas数组就在Frame.data基地址(偏移0)
+ *   - 但通过Frame直接搜索data指针的方式太复杂(帧同步框架内部结构复杂)
  *
- * 关键: 我们有Frame指针(x0), 可以通过Frame.data + Ptr.Offset访问QListPtr中的ExSkillData
+ * v15.1策略: 使用get_ExSkillDatas() API获取QListPtr
+ *   get_ExSkillDatas是CharacterFiled的public方法, 地址0x3073860
+ *   C#签名: QListPtr<ExSkillData> get_ExSkillDatas()
+ *   ARM64: x0=self(CharacterFiled*)
+ *   返回值在x0: QListPtr<ExSkillData> (4字节, Ptr.Offset值)
  *
- * 数据访问路径:
- *   Frame* → Frame.data (Frame内部存储, 偏移待确定)
- *   CharacterFiled+0x28 = ExSkillDatasPtr (FrameSync.Ptr, 含Offset)
- *   实际ExSkillData数组 = Frame.data + ExSkillDatasPtr.Offset
- *   QListInternal = 该地址处的QBuffer结构
- *   QBuffer: Length(+0x10), Stride(+0x14), Ptr.Offset(+0x18+0x10)
- *   实际数据 = Frame.data + Ptr.Offset
+ *   然后通过Frame.data + QListPtr.Offset访问QListInternal
+ *   QListInternal = QBuffer: Length(+0x10), Stride(+0x14), Ptr.Offset(+0x18+0x10)
+ *   ExSkillData数组 = Frame.data + Ptr.Offset
  *
- * v15.0策略: 先做诊断, 确认TryTriggerExSkill是否被调用, 以及参数是否正确
- *            同时尝试多种方式访问ExSkillData
+ *   但我们仍然不知道Frame.data基地址...
+ *   替代方案: 暴力搜索Frame结构内的指针, 找到合理的QListInternal
+ *   特征: Length=1~10, Stride=0x20(ExSkillData大小), 堆指针data
  */
 static int g_tryTriggerLogCount = 0;
+
+// get_ExSkillDatas函数指针: (CharacterFiled*) -> QListPtr<ExSkillData>
+// QListPtr<ExSkillData>实际就是一个int32_t的Offset值
+typedef int32_t (*GetExSkillDatasFunc)(void*);
+static GetExSkillDatasFunc g_funcGetExSkillDatas = NULL;
+
 static BOOL hookTryTriggerExSkill(void *f, uint64_t type, void *trigger, void *fuse,
                                    void *targets, void *character, void *asset, uint64_t triggerData) {
     // 无条件日志: 确认此函数是否被调用
@@ -228,119 +238,129 @@ static BOOL hookTryTriggerExSkill(void *f, uint64_t type, void *trigger, void *f
     }
 
     if (g_exSkillNoCD && character) {
-        uint8_t *cf = (uint8_t*)character;
-
-        // === 诊断: dump CharacterFiled内存 ===
-        static int cfDumpCount = 0;
-        if (cfDumpCount < 3) {
-            cfDumpCount++;
-            jlog(@"CharacterFiled DUMP ptr=%p:", character);
-            for (int off = 0; off < 0x40; off += 8) {
-                uint64_t val = *(uint64_t*)(cf + off);
-                jlog(@"  +0x%02x: 0x%llx", off, val);
-            }
+        // 方法1: 通过get_ExSkillDatas()获取ExSkillDatas的Offset
+        int32_t exDataOffset = -1;
+        if (g_funcGetExSkillDatas) {
+            exDataOffset = g_funcGetExSkillDatas(character);
+            jlog(@"get_ExSkillDatas() = %d (0x%x)", exDataOffset, exDataOffset);
         }
 
-        // === 读取ExSkillDatasPtr (FrameSync.Ptr at CF+0x28) ===
-        // FrameSync.Ptr结构: { Offset: Int32 at Ptr+0x10 }
-        // 但在值类型嵌入时, 实际只有Offset字段(4字节), 没有header
-        // 所以 CF+0x28处直接是Offset值
+        // 方法2: 直接从CharacterFiled+0x28读取(已知Offset=0)
+        if (exDataOffset < 0) {
+            exDataOffset = *(int32_t*)((uint8_t*)character + 0x28);
+            jlog(@"CF+0x28 fallback = %d (0x%x)", exDataOffset, exDataOffset);
+        }
 
-        // 尝试方案A: CF+0x28直接存储Offset(int32)
-        int32_t exDataOffsetA = *(int32_t*)(cf + 0x28);
-        jlog(@"ExData OffsetA = %d (0x%x)", exDataOffsetA, exDataOffsetA);
+        // 现在我们有ExSkillDatas的Offset(=0)
+        // 需要找到Frame.data基地址
+        // 然后在data+Offset处找到QListInternal(QBuffer)
+        // QListInternal: Length(+0x10)=1~10, Stride(+0x14)=0x20
 
-        // 尝试方案B: CF+0x28是8字节(QListPtr), 内含Ptr.Offset at +0x10
-        // 即CF+0x28开始的内存当作QListPtr, QListPtr.Ptr.Offset = *(cf+0x28+0x10)
-        // 但这看起来不太对...
+        // Frame继承自FrameBase->DeterministicFrame
+        // DeterministicFrame字段: Input(0x10), Verified(0x18), Number(0x1c)
+        // FrameBase有更多字段
+        // Frame: _globals(0xe8), _runtimeConfig(0xf0), ...
+        // data基地址可能在Frame结构的前几个字段中
 
-        // 尝试方案C: CF+0x28存储的是FrameSync.Ptr结构
-        // FrameSync.Ptr实际在内存中就是4字节的Offset(int32)
-        // 所以CF+0x28 = ExSkillDatas的Offset
-        // 实际数据地址 = Frame.data + Offset
-        // 但我们不知道Frame.data的基地址...
+        // 暴力搜索: 从Frame+0x08到Frame+0x100, 每个8字节当指针
+        // 然后ptr+exDataOffset处检查是否有合理的QListInternal
+        if (f && exDataOffset >= 0) {
+            uint8_t *fp = (uint8_t*)f;
+            BOOL found = NO;
 
-        // === 替代思路: 直接通过Frame访问 ===
-        // Frame指针是x0参数
-        // dump Frame内存看看结构
-        if (f) {
-            static int frameDumpCount = 0;
-            if (frameDumpCount < 2) {
-                frameDumpCount++;
-                uint8_t *fp = (uint8_t*)f;
-                jlog(@"Frame DUMP ptr=%p:", f);
-                for (int off = 0; off < 0x40; off += 8) {
-                    uint64_t val = *(uint64_t*)(fp + off);
-                    jlog(@"  +0x%02x: 0x%llx", off, val);
+            for (int dataOff = 0x08; dataOff <= 0x100 && !found; dataOff += 0x08) {
+                void *possibleDataPtr = *(void**)(fp + dataOff);
+                if (!possibleDataPtr || (uintptr_t)possibleDataPtr < 0x100000000ULL) continue;
+
+                uint8_t *targetAddr = (uint8_t*)possibleDataPtr + exDataOffset;
+
+                // 安全检查
+                vm_size_t sz = 0;
+                vm_address_t addr = (vm_address_t)targetAddr;
+                vm_region_basic_info_data_64_t info;
+                mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+                kern_return_t kr = vm_region_64(mach_task_self(), &addr, &sz, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, NULL);
+                if (kr != KERN_SUCCESS) continue;
+
+                // 检查QListInternal结构
+                int32_t length = *(int32_t*)(targetAddr + 0x10);
+                int32_t stride = *(int32_t*)(targetAddr + 0x14);
+
+                // 也尝试读取Ptr.Offset at +0x18+0x10
+                // 但更简单: 如果Stride=0x20且Length合理, 直接在targetAddr+0x18找数据指针
+                if (length > 0 && length <= 10 && stride == ESD_SIZE) {
+                    // QListInternal.Ptr at +0x18, Ptr.Offset at Ptr+0x10
+                    int32_t dataOffset2 = *(int32_t*)(targetAddr + 0x18 + 0x10);
+
+                    // 尝试data_base + dataOffset2
+                    uint8_t *exSkillDataAddr = (uint8_t*)possibleDataPtr + dataOffset2;
+
+                    // 也尝试直接把+0x18处当指针(如果Offset解析不对)
+                    addr = (vm_address_t)exSkillDataAddr;
+                    kr = vm_region_64(mach_task_self(), &addr, &sz, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, NULL);
+
+                    jlog(@"Frame+0x%x=%p QLI(%p): Len=%d Stride=%d DataOff2=%d %s",
+                         dataOff, possibleDataPtr, targetAddr, length, stride, dataOffset2,
+                         kr == KERN_SUCCESS ? "OK" : "FAIL");
+
+                    if (kr == KERN_SUCCESS) {
+                        // 验证ExSkillData内容合理性
+                        int16_t lv = *(int16_t*)(exSkillDataAddr + ESD_LV);
+                        int32_t id = *(int32_t*)(exSkillDataAddr + ESD_ID);
+                        jlog(@"ExSkillData[0]: id=%d lv=%d", id, lv);
+
+                        // id应该>0且合理(技能ID通常在1000-9999范围)
+                        if (id > 0 && id < 100000) {
+                            jlog(@"FOUND ExSkillData! addr=%p count=%d", exSkillDataAddr, length);
+
+                            // dump第一个ExSkillData
+                            uint8_t *p = exSkillDataAddr;
+                            jlog(@"  DUMP: %02x %02x %02x %02x  %02x %02x %02x %02x  %02x %02x %02x %02x  %02x %02x %02x %02x",
+                                 p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7],
+                                 p[8],p[9],p[10],p[11],p[12],p[13],p[14],p[15]);
+                            jlog(@"  DUMP: %02x %02x %02x %02x  %02x %02x %02x %02x  %02x %02x %02x %02x  %02x %02x %02x %02x",
+                                 p[16],p[17],p[18],p[19],p[20],p[21],p[22],p[23],
+                                 p[24],p[25],p[26],p[27],p[28],p[29],p[30],p[31]);
+
+                            // 修改怒气值!
+                            fillExSkillAnger(exSkillDataAddr, length);
+                            found = YES;
+                        }
+                    }
+
+                    // 如果dataOffset2方式失败, 尝试另一种: QListInternal+0x18是Ptr结构
+                    // Ptr的实际布局可能是: { Offset at +0x10 } 但也可能直接是指针
+                    if (!found) {
+                        void *directPtr = *(void**)(targetAddr + 0x18);
+                        if (directPtr && (uintptr_t)directPtr > 0x100000000ULL) {
+                            addr = (vm_address_t)directPtr;
+                            kr = vm_region_64(mach_task_self(), &addr, &sz, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, NULL);
+                            if (kr == KERN_SUCCESS) {
+                                int16_t lv = *(int16_t*)((uint8_t*)directPtr + ESD_LV);
+                                int32_t id = *(int32_t*)((uint8_t*)directPtr + ESD_ID);
+                                jlog(@"DirectPtr %p: id=%d lv=%d", directPtr, id, lv);
+
+                                if (id > 0 && id < 100000) {
+                                    jlog(@"FOUND ExSkillData via DirectPtr! addr=%p count=%d", directPtr, length);
+                                    fillExSkillAnger(directPtr, length);
+                                    found = YES;
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
-            // 尝试: Frame可能有一个data字段
-            // 帧同步架构中, Frame.data是所有帧同步数据的基地址
-            // 常见的Frame结构: { tick, ... , data_ptr }
-            // 但具体偏移需要逆向
-
-            // 如果exDataOffsetA看起来像合理的偏移(0 < offset < 1MB)
-            // 且Frame有data指针, 我们可以尝试:
-            // 1. 从Frame中找到data指针
-            // 2. data_ptr + exDataOffsetA = QListInternal*
-            // 3. 从QListInternal中读取ExSkillData数组
-
-            if (exDataOffsetA > 0 && exDataOffsetA < 0x100000) {
-                // Offset看起来合理, 尝试在Frame中寻找data基地址
-                // 常见Frame.data偏移: 0x08, 0x10, 0x18等
-                uint8_t *fp = (uint8_t*)f;
-                for (int dataOff = 0x08; dataOff <= 0x30; dataOff += 0x08) {
-                    void *possibleDataPtr = *(void**)(fp + dataOff);
-                    if (possibleDataPtr && (uintptr_t)possibleDataPtr > 0x100000000ULL) {
-                        // 看起来像64位堆指针
-                        uint8_t *targetAddr = (uint8_t*)possibleDataPtr + exDataOffsetA;
-
-                        // 安全检查
-                        vm_size_t sz = 0;
-                        vm_address_t addr = (vm_address_t)targetAddr;
-                        vm_region_basic_info_data_64_t info;
-                        mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
-                        kern_return_t kr = vm_region_64(mach_task_self(), &addr, &sz, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, NULL);
-
-                        if (kr == KERN_SUCCESS) {
-                            // 可读! 尝试解析为QListInternal
-                            int32_t length = *(int32_t*)(targetAddr + 0x10);
-                            int32_t stride = *(int32_t*)(targetAddr + 0x14);
-                            int32_t dataOffset2 = *(int32_t*)(targetAddr + 0x18 + 0x10);
-
-                            jlog(@"Frame+0x%x=%p -> QLI(%p): Len=%d Stride=%d DataOff2=%d",
-                                 dataOff, possibleDataPtr, targetAddr, length, stride, dataOffset2);
-
-                            // 如果length合理(1-10个ExSkillData)且stride=0x20
-                            if (length > 0 && length <= 10 && stride == ESD_SIZE) {
-                                // 找到了! dataOffset2是ExSkillData数组的偏移
-                                uint8_t *exSkillDataAddr = (uint8_t*)possibleDataPtr + dataOffset2;
-
-                                // 安全检查
-                                addr = (vm_address_t)exSkillDataAddr;
-                                kr = vm_region_64(mach_task_self(), &addr, &sz, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, NULL);
-                                if (kr == KERN_SUCCESS) {
-                                    jlog(@"FOUND ExSkillData at %p (Frame+0x%x->%p+%d+%d) count=%d",
-                                         exSkillDataAddr, dataOff, possibleDataPtr, exDataOffsetA, dataOffset2, length);
-
-                                    // dump第一个ExSkillData
-                                    jlog(@"ExSkillData[0] DUMP:");
-                                    uint8_t *p = exSkillDataAddr;
-                                    jlog(@"  +00: %02x %02x %02x %02x  %02x %02x %02x %02x  %02x %02x %02x %02x  %02x %02x %02x %02x",
-                                         p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7],
-                                         p[8],p[9],p[10],p[11],p[12],p[13],p[14],p[15]);
-                                    jlog(@"  +10: %02x %02x %02x %02x  %02x %02x %02x %02x  %02x %02x %02x %02x  %02x %02x %02x %02x",
-                                         p[16],p[17],p[18],p[19],p[20],p[21],p[22],p[23],
-                                         p[24],p[25],p[26],p[27],p[28],p[29],p[30],p[31]);
-
-                                    // 修改怒气值!
-                                    fillExSkillAnger(exSkillDataAddr, length);
-
-                                    // 只需要成功一次
-                                    break;
-                                }
-                            }
+            if (!found) {
+                jlog(@"ExSkillData NOT FOUND, dumping more Frame fields");
+                // 扩大搜索范围, 输出更多Frame字段帮助调试
+                static int extendedDump = 0;
+                if (extendedDump < 2) {
+                    extendedDump++;
+                    for (int off = 0x40; off < 0x100; off += 0x08) {
+                        uint64_t val = *(uint64_t*)(fp + off);
+                        if (val > 0x100000000ULL && val < 0x2000000000ULL) {
+                            jlog(@"  Frame+0x%02x = %p (heap ptr?)", off, (void*)val);
                         }
                     }
                 }
@@ -446,6 +466,10 @@ static void findIL2CPP(void) {
                     jlog(@"FOUND %s.TryTriggerExSkill params=%u addr=%p [5.怒气加满]", cn ?: "?", pc, funcAddr);
                     g_funcTryTriggerExSkill = funcAddr; found++;
                 }
+                else if (strcmp(n, "get_ExSkillDatas") == 0 && !g_funcGetExSkillDatas) {
+                    jlog(@"FOUND %s.get_ExSkillDatas params=%u addr=%p [helper]", cn ?: "?", pc, funcAddr);
+                    g_funcGetExSkillDatas = (GetExSkillDatasFunc)funcAddr; found++;
+                }
                 else if (strcmp(n, "get_limitDamage") == 0 && !g_funcLimitDmg) {
                     jlog(@"FOUND %s.get_limitDamage params=%u addr=%p [4.伤害上限]", cn ?: "?", pc, funcAddr);
                     g_funcLimitDmg = funcAddr; found++;
@@ -455,8 +479,8 @@ static void findIL2CPP(void) {
     }
 
     jlog(@"Scanned %d methods, found %d targets", totalMethods, found);
-    jlog(@"[1]Unlock=%p [2]CanUse=%p [3]IsCD=%p [4]LimitDmg=%p [5]TryTrigger=%p",
-         g_funcCheckSkillUnlock, g_funcCanUseExSkill, g_funcIsExSkillInCD, g_funcLimitDmg, g_funcTryTriggerExSkill);
+    jlog(@"[1]Unlock=%p [2]CanUse=%p [3]IsCD=%p [4]LimitDmg=%p [5]TryTrigger=%p [6]GetExData=%p",
+         g_funcCheckSkillUnlock, g_funcCanUseExSkill, g_funcIsExSkillInCD, g_funcLimitDmg, g_funcTryTriggerExSkill, (void*)g_funcGetExSkillDatas);
 }
 
 // ============================================================
@@ -616,7 +640,7 @@ static void setupUI(void) {
     g_panel.layer.cornerRadius=14; g_panel.hidden=YES; [win addSubview:g_panel];
 
     UILabel *title=[[UILabel alloc]initWithFrame:CGRectMake(0,8,pw,22)];
-    title.text=@"\u5251\u5f71\u6c5f\u6e56 v15.0"; title.textColor=[UIColor cyanColor];
+    title.text=@"\u5251\u5f71\u6c5f\u6e56 v15.1"; title.textColor=[UIColor cyanColor];
     title.font=[UIFont boldSystemFontOfSize:14]; title.textAlignment=NSTextAlignmentCenter; [g_panel addSubview:title];
 
     CGFloat bx=16, bw=228, bh=32, by0=34, bdy=36;
@@ -654,7 +678,7 @@ static void initialize(void) {
     if (loaded) { jlog(@"Already loaded, skip"); return; }
     loaded = YES;
 
-    jlog(@"========== JYJH v15.0 (TryTriggerExSkill hook) ==========");
+    jlog(@"========== JYJH v15.1 (TryTriggerExSkill hook) ==========");
     jlog(@"iOS %@", [[UIDevice currentDevice] systemVersion]);
     jlog(@"Bundle %@", [[NSBundle mainBundle] bundleIdentifier]);
     jlog(@"v15.0: 新增TryTriggerExSkill hook(怒气加满) + IsExSkillInCD(返回NO)");
