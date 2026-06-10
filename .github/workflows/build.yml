@@ -1,4 +1,4 @@
-name: Build JYJH NoCDNoEnergy Dylib (v12.5)
+name: Build JYJH NoCDNoEnergy Dylib (v12.6)
 
 on:
   push:
@@ -130,20 +130,20 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JYJH-NoCDNoEnergy-dylib-v12.5
+          name: JYJH-NoCDNoEnergy-dylib-v12.6
           path: output/
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v12.5
+          tag_name: v12.6
           files: output/*
           body: |
-            ## 剑影江湖 v12.5 - 双层Hook(帧同步+UI) + CD修复
-            - 帧同步层6个: 无CD/无能量/忽略解锁/大招可用/大招无CD/伤害上限
-            - UI层2个: get_IsUnlock→true, get_IsAnger→false
-            - ExSkillData.LastTriggerTime偏移修正为0x20(dump.cs确认)
+            ## 剑影江湖 v12.6 - 区分普通技能/大招 + CD修复
+            - CheckSkillIsReady/CheckSkillAttackCanUse区分普通技能(1-4)和大招(5-6)
+            - 大招返回true需要同时满足忽略解锁+大招无CD, 避免卡死
+            - 去掉get_IsUnlock/get_IsAnger(同地址, hook冲突)
+            - ExSkillData.LastTriggerTime偏移0x20(dump.cs确认)
             - 伤害上限: 最大30000, 默认100
-            - 去掉调试日志窗口
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
