@@ -1,4 +1,4 @@
-name: Build JYJH NoCDNoEnergy Dylib (v23.0)
+name: Build JYJH NoCDNoEnergy Dylib (v24.0)
 
 on:
   push:
@@ -77,8 +77,8 @@ jobs:
           which arm-apple-darwin11-clang || { echo "ERROR: clang not found!"; ls "$TOOLCHAIN/bin/" | head -20; exit 1; }
           ls -la "$DOBBY_LIB" || { echo "ERROR: Dobby lib not found!"; exit 1; }
           echo "=== Source file ==="
-          ls -la JYJH_NoCDNoEnergy_v23.m
-          head -5 JYJH_NoCDNoEnergy_v23.m
+          ls -la JYJH_NoCDNoEnergy_v24.m
+          head -5 JYJH_NoCDNoEnergy_v24.m
           
           echo "=== Compiling ==="
           arm-apple-darwin11-clang \
@@ -87,7 +87,7 @@ jobs:
             -isysroot "$SDK" \
             -fobjc-arc \
             -I. \
-            -c JYJH_NoCDNoEnergy_v23.m \
+            -c JYJH_NoCDNoEnergy_v24.m \
             -o JYJH_NoCDNoEnergy.o
           
           echo "Compile OK, linking with Dobby..."
@@ -130,21 +130,22 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JYJH-NoCDNoEnergy-dylib-v23.0
+          name: JYJH-NoCDNoEnergy-dylib-v24.0
           path: output/
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v23.0
+          tag_name: v24.0
           files: output/*
           body: |
-            ## 剑影江湖 v23.0 - 定时器刷满怒气
-            - **核心变更**: 用GCD定时器每100ms修改ExSkillData.Data(怒气值)
-            - v22确认: 普通技能无CD有效, 大招有独立怒气UI判断
-            - 大招怒气检查不在CheckSkillIsReady中,是UI层直接读ExSkillData.Data
-            - 定时器从TryTriggerExSkill hook中缓存Frame/Character指针
-            - 每次TryTriggerExSkill被调用时更新缓存+修改怒气
-            - 按钮改名: "大招无CD" → "怒气加满"
+            ## 剑影江湖 v24.0 - Hook IsExSkillInCD
+            - **核心变更**: Hook IsExSkillInCD返回NO(怒气已满+CD已过)
+            - v23教训: 定时器刷怒气无效，帧同步每帧回滚ExSkillData.Data
+            - v24新增hook: IsExSkillInCD/TriggerExSkill/DoUseExSkill
+            - IsExSkillInCD是帧同步内部CD检查，返回NO=大招可用
+            - TriggerExSkill: 原始返回NO时强制YES
+            - DoUseExSkill: 监控大招使用
+            - CheckSkillIsReady/AttackCanUse对stateType>=17全部强制YES
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
