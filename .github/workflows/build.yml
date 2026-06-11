@@ -1,4 +1,4 @@
-name: Build JYJH NoCDNoEnergy Dylib (v19.0)
+name: Build JYJH NoCDNoEnergy Dylib (v20.0)
 
 on:
   push:
@@ -77,8 +77,8 @@ jobs:
           which arm-apple-darwin11-clang || { echo "ERROR: clang not found!"; ls "$TOOLCHAIN/bin/" | head -20; exit 1; }
           ls -la "$DOBBY_LIB" || { echo "ERROR: Dobby lib not found!"; exit 1; }
           echo "=== Source file ==="
-          ls -la JYJH_NoCDNoEnergy_v19.m
-          head -5 JYJH_NoCDNoEnergy_v19.m
+          ls -la JYJH_NoCDNoEnergy_v20.m
+          head -5 JYJH_NoCDNoEnergy_v20.m
           
           echo "=== Compiling ==="
           arm-apple-darwin11-clang \
@@ -87,7 +87,7 @@ jobs:
             -isysroot "$SDK" \
             -fobjc-arc \
             -I. \
-            -c JYJH_NoCDNoEnergy_v19.m \
+            -c JYJH_NoCDNoEnergy_v20.m \
             -o JYJH_NoCDNoEnergy.o
           
           echo "Compile OK, linking with Dobby..."
@@ -130,20 +130,21 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JYJH-NoCDNoEnergy-dylib-v19.0
+          name: JYJH-NoCDNoEnergy-dylib-v20.0
           path: output/
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v19.0
+          tag_name: v20.0
           files: output/*
           body: |
-            ## 剑影江湖 v19.0 - 修正QListInternal偏移
-            - **关键修复**: QListInternal没有0x10的il2cpp header!
-            - v18日志hex dump验证: +0x00=4(count), +0x08=0x20(stride), +0x0c=itemsOffset
-            - 修正偏移: _count=+0x00, _capacity=+0x04, _stride=+0x08, _itemsOffset=+0x0c
-            - stride=0x20确认存的是ExSkillData，不是id列表
-            - ExSkillData数组地址 = (qListInternal - listOffset) + itemsOffset
+            ## 剑影江湖 v20.0 - 去掉id限制 + 验证写入
+            - **关键BUG修复**: v19中ExSkill[0] id=10020501被跳过(因为id<100000限制)
+            - id=10020501很可能就是TryTriggerExSkill type=1024对应的大招!
+            - 去掉id范围限制，修改所有id!=0的ExSkillData
+            - 增加写入验证：修改后读回确认数据正确
+            - 增加原函数返回值日志：确认大招是否被成功触发
+            - 增加hex dump帮助定位数据结构
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
