@@ -75,7 +75,7 @@ static GetExSkillDatasFunc g_funcGetExSkillDatas = NULL;
 static ResolveListFunc g_funcResolveList = NULL;
 
 // 定时器相关
-static dispatch_source_t g_angerTimer = NULL;
+static dispatch_source_t g_angerTimer = 0;
 
 // ============================================================
 // 核心函数：修改ExSkillData怒气
@@ -229,7 +229,7 @@ static void startAngerTimer(void) {
 static void stopAngerTimer(void) {
     if (!g_angerTimer) return;
     dispatch_source_cancel(g_angerTimer);
-    g_angerTimer = NULL;
+    g_angerTimer = 0;
     g_cachedFrame = NULL;
     g_cachedCharacter = NULL;
     g_angerFillCount = 0;
