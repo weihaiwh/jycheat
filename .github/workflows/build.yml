@@ -1,4 +1,4 @@
-name: Build JYJH NoCDNoEnergy Dylib (v18.0)
+name: Build JYJH NoCDNoEnergy Dylib (v19.0)
 
 on:
   push:
@@ -77,8 +77,8 @@ jobs:
           which arm-apple-darwin11-clang || { echo "ERROR: clang not found!"; ls "$TOOLCHAIN/bin/" | head -20; exit 1; }
           ls -la "$DOBBY_LIB" || { echo "ERROR: Dobby lib not found!"; exit 1; }
           echo "=== Source file ==="
-          ls -la JYJH_NoCDNoEnergy_v18.m
-          head -5 JYJH_NoCDNoEnergy_v18.m
+          ls -la JYJH_NoCDNoEnergy_v19.m
+          head -5 JYJH_NoCDNoEnergy_v19.m
           
           echo "=== Compiling ==="
           arm-apple-darwin11-clang \
@@ -87,7 +87,7 @@ jobs:
             -isysroot "$SDK" \
             -fobjc-arc \
             -I. \
-            -c JYJH_NoCDNoEnergy_v18.m \
+            -c JYJH_NoCDNoEnergy_v19.m \
             -o JYJH_NoCDNoEnergy.o
           
           echo "Compile OK, linking with Dobby..."
@@ -130,19 +130,20 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JYJH-NoCDNoEnergy-dylib-v18.0
+          name: JYJH-NoCDNoEnergy-dylib-v19.0
           path: output/
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v18.0
+          tag_name: v19.0
           files: output/*
           body: |
-            ## 剑影江湖 v18.0 - 修复ExSkillData数据访问
-            - **关键发现**: QListInternal stride=4说明存的是ExSkillData ID列表，不是ExSkillData本身
-            - **修复**: 读取ID列表后用TryGetExSkillDataPointer获取真正的ExSkillData指针
-            - 增加大量调试dump输出帮助定位数据结构
-            - 保留: 忽略解锁/大招可用/大招无CD/伤害上限
+            ## 剑影江湖 v19.0 - 修正QListInternal偏移
+            - **关键修复**: QListInternal没有0x10的il2cpp header!
+            - v18日志hex dump验证: +0x00=4(count), +0x08=0x20(stride), +0x0c=itemsOffset
+            - 修正偏移: _count=+0x00, _capacity=+0x04, _stride=+0x08, _itemsOffset=+0x0c
+            - stride=0x20确认存的是ExSkillData，不是id列表
+            - ExSkillData数组地址 = (qListInternal - listOffset) + itemsOffset
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
