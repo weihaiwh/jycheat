@@ -1,4 +1,4 @@
-name: Build JYJH NoCDNoEnergy Dylib (v21.0)
+name: Build JYJH NoCDNoEnergy Dylib (v22.0)
 
 on:
   push:
@@ -77,8 +77,8 @@ jobs:
           which arm-apple-darwin11-clang || { echo "ERROR: clang not found!"; ls "$TOOLCHAIN/bin/" | head -20; exit 1; }
           ls -la "$DOBBY_LIB" || { echo "ERROR: Dobby lib not found!"; exit 1; }
           echo "=== Source file ==="
-          ls -la JYJH_NoCDNoEnergy_v21.m
-          head -5 JYJH_NoCDNoEnergy_v21.m
+          ls -la JYJH_NoCDNoEnergy_v22.m
+          head -5 JYJH_NoCDNoEnergy_v22.m
           
           echo "=== Compiling ==="
           arm-apple-darwin11-clang \
@@ -87,7 +87,7 @@ jobs:
             -isysroot "$SDK" \
             -fobjc-arc \
             -I. \
-            -c JYJH_NoCDNoEnergy_v21.m \
+            -c JYJH_NoCDNoEnergy_v22.m \
             -o JYJH_NoCDNoEnergy.o
           
           echo "Compile OK, linking with Dobby..."
@@ -130,21 +130,21 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JYJH-NoCDNoEnergy-dylib-v21.0
+          name: JYJH-NoCDNoEnergy-dylib-v22.0
           path: output/
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v21.0
+          tag_name: v22.0
           files: output/*
           body: |
-            ## 剑影江湖 v21.0 - 强制TryTriggerExSkill返回YES
-            - **核心变更**: TryTriggerExSkill/OrAdd强制返回YES
-            - v20发现: 修改ExSkillData成功(verify✓OK)但原函数仍返回NO
-            - 说明原函数内部有其他检查条件，仅修改数据不够
-            - 强制返回YES绕过所有检查
-            - **重要**: 必须同时开启忽略解锁防止卡住!
-            - 保留: 忽略解锁/大招可用/伤害上限
+            ## 剑影江湖 v22.0 - hook CheckSkillIsReady+CheckSkillAttackCanUse
+            - **核心变更**: 新增hook CheckSkillIsReady和CheckSkillAttackCanUse
+            - v21发现: TryTriggerExSkill强制YES但UI仍提示"怒气不足"
+            - 原因: 客户端CheckSkillIsReady检查怒气→拒绝发送UseExSkill输入
+            - 只对stateType>=17(大招)返回YES，普通技能走原逻辑
+            - 同时保留TryTriggerExSkill/OrAdd强制YES
+            - 必须同时开启忽略解锁
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
