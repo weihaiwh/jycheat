@@ -1,4 +1,4 @@
-name: Build JYJH NoCDNoEnergy Dylib (v20.0)
+name: Build JYJH NoCDNoEnergy Dylib (v21.0)
 
 on:
   push:
@@ -77,8 +77,8 @@ jobs:
           which arm-apple-darwin11-clang || { echo "ERROR: clang not found!"; ls "$TOOLCHAIN/bin/" | head -20; exit 1; }
           ls -la "$DOBBY_LIB" || { echo "ERROR: Dobby lib not found!"; exit 1; }
           echo "=== Source file ==="
-          ls -la JYJH_NoCDNoEnergy_v20.m
-          head -5 JYJH_NoCDNoEnergy_v20.m
+          ls -la JYJH_NoCDNoEnergy_v21.m
+          head -5 JYJH_NoCDNoEnergy_v21.m
           
           echo "=== Compiling ==="
           arm-apple-darwin11-clang \
@@ -87,7 +87,7 @@ jobs:
             -isysroot "$SDK" \
             -fobjc-arc \
             -I. \
-            -c JYJH_NoCDNoEnergy_v20.m \
+            -c JYJH_NoCDNoEnergy_v21.m \
             -o JYJH_NoCDNoEnergy.o
           
           echo "Compile OK, linking with Dobby..."
@@ -130,21 +130,21 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JYJH-NoCDNoEnergy-dylib-v20.0
+          name: JYJH-NoCDNoEnergy-dylib-v21.0
           path: output/
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v20.0
+          tag_name: v21.0
           files: output/*
           body: |
-            ## 剑影江湖 v20.0 - 去掉id限制 + 验证写入
-            - **关键BUG修复**: v19中ExSkill[0] id=10020501被跳过(因为id<100000限制)
-            - id=10020501很可能就是TryTriggerExSkill type=1024对应的大招!
-            - 去掉id范围限制，修改所有id!=0的ExSkillData
-            - 增加写入验证：修改后读回确认数据正确
-            - 增加原函数返回值日志：确认大招是否被成功触发
-            - 增加hex dump帮助定位数据结构
+            ## 剑影江湖 v21.0 - 强制TryTriggerExSkill返回YES
+            - **核心变更**: TryTriggerExSkill/OrAdd强制返回YES
+            - v20发现: 修改ExSkillData成功(verify✓OK)但原函数仍返回NO
+            - 说明原函数内部有其他检查条件，仅修改数据不够
+            - 强制返回YES绕过所有检查
+            - **重要**: 必须同时开启忽略解锁防止卡住!
+            - 保留: 忽略解锁/大招可用/伤害上限
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
