@@ -1,4 +1,4 @@
-name: Build JYJH NoCDNoEnergy Dylib (v16.0)
+name: Build JYJH NoCDNoEnergy Dylib (v17.0)
 
 on:
   push:
@@ -77,8 +77,8 @@ jobs:
           which arm-apple-darwin11-clang || { echo "ERROR: clang not found!"; ls "$TOOLCHAIN/bin/" | head -20; exit 1; }
           ls -la "$DOBBY_LIB" || { echo "ERROR: Dobby lib not found!"; exit 1; }
           echo "=== Source file ==="
-          ls -la JYJH_NoCDNoEnergy_v16.m
-          head -5 JYJH_NoCDNoEnergy_v16.m
+          ls -la JYJH_NoCDNoEnergy_v17.m
+          head -5 JYJH_NoCDNoEnergy_v17.m
           
           echo "=== Compiling ==="
           arm-apple-darwin11-clang \
@@ -87,7 +87,7 @@ jobs:
             -isysroot "$SDK" \
             -fobjc-arc \
             -I. \
-            -c JYJH_NoCDNoEnergy_v16.m \
+            -c JYJH_NoCDNoEnergy_v17.m \
             -o JYJH_NoCDNoEnergy.o
           
           echo "Compile OK, linking with Dobby..."
@@ -130,20 +130,19 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JYJH-NoCDNoEnergy-dylib-v16.0
+          name: JYJH-NoCDNoEnergy-dylib-v17.0
           path: output/
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v16.0
+          tag_name: v17.0
           files: output/*
           body: |
-            ## 剑影江湖 v16.0 - 轻量TryTriggerExSkill hook + ResolveList API
-            - **核心变更**: 去掉IsExSkillInCD强制返回NO(这是v15卡住的主因)
-            - TryTriggerExSkill hook改为轻量版: 用ResolveList/TryGetExSkillDataPointer API
-            - 不做vm_region/暴力搜索等耗时操作(避免帧同步超时)
-            - 修改ExSkillData后调原函数(不改返回值，避免帧同步校验不一致)
+            ## 剑影江湖 v17.0 - TriggerExSkillOrAdd策略
+            - **核心变更**: 新增hook TriggerExSkillOrAdd(怒气不够时被调用)
+            - 在hook中先fillExSkillAnger填满怒气，再调原函数→触发大招
+            - 保留TryTriggerExSkill hook(怒气满时被调用)
             - 保留: 忽略解锁/大招可用/伤害上限
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
