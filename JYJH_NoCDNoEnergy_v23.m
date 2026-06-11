@@ -77,6 +77,11 @@ static ResolveListFunc g_funcResolveList = NULL;
 // 定时器相关
 static dispatch_source_t g_angerTimer = 0;
 
+// 缓存Frame和Character指针（从TryTriggerExSkill的hook中获取）
+static void *g_cachedFrame = NULL;
+static void *g_cachedCharacter = NULL;
+static int g_angerFillCount = 0;
+
 // ============================================================
 // 核心函数：修改ExSkillData怒气
 // ============================================================
@@ -198,11 +203,6 @@ static int hookLimitDmg(void *self) { return g_damageLimit; }
 // ============================================================
 // 定时器刷怒气 (v23核心!)
 // ============================================================
-
-// 缓存Frame和Character指针（从TryTriggerExSkill的hook中获取）
-static void *g_cachedFrame = NULL;
-static void *g_cachedCharacter = NULL;
-static int g_angerFillCount = 0;
 
 static void angerTimerProc(void *ctx) {
     if (!g_exSkillNoCD) return;
