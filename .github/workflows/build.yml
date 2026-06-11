@@ -1,4 +1,4 @@
-name: Build JYJH NoCDNoEnergy Dylib (v15.0)
+name: Build JYJH NoCDNoEnergy Dylib (v16.0)
 
 on:
   push:
@@ -77,8 +77,8 @@ jobs:
           which arm-apple-darwin11-clang || { echo "ERROR: clang not found!"; ls "$TOOLCHAIN/bin/" | head -20; exit 1; }
           ls -la "$DOBBY_LIB" || { echo "ERROR: Dobby lib not found!"; exit 1; }
           echo "=== Source file ==="
-          ls -la JYJH_NoCDNoEnergy_v15.m
-          head -5 JYJH_NoCDNoEnergy_v15.m
+          ls -la JYJH_NoCDNoEnergy_v16.m
+          head -5 JYJH_NoCDNoEnergy_v16.m
           
           echo "=== Compiling ==="
           arm-apple-darwin11-clang \
@@ -87,7 +87,7 @@ jobs:
             -isysroot "$SDK" \
             -fobjc-arc \
             -I. \
-            -c JYJH_NoCDNoEnergy_v15.m \
+            -c JYJH_NoCDNoEnergy_v16.m \
             -o JYJH_NoCDNoEnergy.o
           
           echo "Compile OK, linking with Dobby..."
@@ -130,21 +130,20 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JYJH-NoCDNoEnergy-dylib-v15.0
+          name: JYJH-NoCDNoEnergy-dylib-v16.0
           path: output/
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v15.0
+          tag_name: v16.0
           files: output/*
           body: |
-            ## 剑影江湖 v15.0 - TryTriggerExSkill hook(怒气加满)
-            - **核心变更**: 新增hook TryTriggerExSkill (public, 8参数)
-            - v14.0发现IsExSkillInCD(private)从未被调用, 改为hook TryTriggerExSkill(public)
-            - 在TryTriggerExSkill中通过CharacterFiled+Frame访问ExSkillData, 修改怒气值为极大值
-            - 同时保留IsExSkillInCD hook(返回NO=不在CD)
+            ## 剑影江湖 v16.0 - 轻量TryTriggerExSkill hook + ResolveList API
+            - **核心变更**: 去掉IsExSkillInCD强制返回NO(这是v15卡住的主因)
+            - TryTriggerExSkill hook改为轻量版: 用ResolveList/TryGetExSkillDataPointer API
+            - 不做vm_region/暴力搜索等耗时操作(避免帧同步超时)
+            - 修改ExSkillData后调原函数(不改返回值，避免帧同步校验不一致)
             - 保留: 忽略解锁/大招可用/伤害上限
-            - 完全不hook帧同步关键路径函数(CheckSkillAttackCanUse/CheckSkillIsReady)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
