@@ -49,7 +49,9 @@ typedef BOOL (*BoolFunc7)(void*, uint64_t, void*, uint64_t, void*, void*, int);
 typedef BOOL (*BoolFunc4)(void*, int, void*, void*);
 
 // BattleInputOptHelper.SetInputOpt(Int32 optType, Int32 optData) - 静态方法
-typedef void (*SetInputOptFunc)(int, int);
+// IL2CPP静态方法有一个隐含的MethodInfo*参数在x0！
+// 实际签名: SetInputOpt(MethodInfo* method, Int32 optType, Int32 optData)
+typedef void (*SetInputOptFunc)(void*, int, int);
 // BattleGameLogic.DoConfirmOpt(Int32 optType, Int32 optData) - 实例方法
 typedef void (*DoConfirmOptFunc)(void*, int, int);
 // BattleGameLogic.OnClickSkill_6() - 实例方法
@@ -148,10 +150,10 @@ static int hookLimitDmg(void *self) { return g_damageLimit; }
 // v27核心: Hook OnClickSkill_6 + SetInputOpt + DoConfirmOpt
 // ============================================================
 
-// BattleInputOptHelper.SetInputOpt(Int32 optType, Int32 optData) - 静态方法
+// BattleInputOptHelper.SetInputOpt(MethodInfo*, Int32 optType, Int32 optData) - 静态方法
 // 监控UseExSkill(20014)输入
 static int g_setInputOptCount = 0;
-static void hookSetInputOpt(int optType, int optData) {
+static void hookSetInputOpt(void *method, int optType, int optData) {
     if (g_exSkillNoCD) {
         if (optType == 20014) {
             if (g_setInputOptCount < 30) {
@@ -162,7 +164,7 @@ static void hookSetInputOpt(int optType, int optData) {
             jlog(@"SetInputOpt type=%d data=%d", optType, optData);
         }
     }
-    if (g_origSetInputOpt) g_origSetInputOpt(optType, optData);
+    if (g_origSetInputOpt) g_origSetInputOpt(method, optType, optData);
 }
 
 // BattleGameLogic.DoConfirmOpt(Int32 optType, Int32 optData) - 实例方法
@@ -183,7 +185,7 @@ static void hookDoConfirmOpt(void *self, int optType, int optData) {
 }
 
 // BattleGameLogic.OnClickSkill_6() - 玩家点击大招按钮
-// 如果怒气不够UI层不会发UseExSkill，我们直接调SetInputOpt(20014,0)绕过
+// 如果怒气不够UI层不会发UseExSkill，我们直接调SetInputOpt绕过
 static int g_onClickSkill6Count = 0;
 static void hookOnClickSkill6(void *self) {
     if (g_exSkillNoCD) {
@@ -194,8 +196,9 @@ static void hookOnClickSkill6(void *self) {
         // 先调用原始OnClickSkill_6
         if (g_origOnClickSkill6) g_origOnClickSkill6(self);
         // 然后强制发送UseExSkill输入(绕过UI层怒气检查)
+        // IL2CPP静态方法第一个参数是MethodInfo*，传NULL即可
         if (g_origSetInputOpt) {
-            g_origSetInputOpt(20014, 0);
+            g_origSetInputOpt(NULL, 20014, 0);
         }
         return;
     }

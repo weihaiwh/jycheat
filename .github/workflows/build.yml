@@ -1,4 +1,4 @@
-name: Build JYJH NoCDNoEnergy Dylib (v27.0)
+name: Build JYJH NoCDNoEnergy Dylib (v27.1)
 
 on:
   push:
@@ -130,21 +130,19 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JYJH-NoCDNoEnergy-dylib-v27.0
+          name: JYJH-NoCDNoEnergy-dylib-v27.1
           path: output/
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v27.0
+          tag_name: v27.1
           files: output/*
           body: |
-            ## 剑影江湖 v27.0 - OnClickSkill_6强制UseExSkill
-            - **核心变更**: Hook OnClickSkill_6强制发送UseExSkill(20014)输入
-            - v26发现: OnUpdate中0x351偏移读出65/176等非bool值，修改导致卡住
-            - v27移除危险的OnUpdate内存修改
-            - 新增hook: OnClickSkill_6 → 点击大招时调SetInputOpt(20014,0)
-            - 如果UI层因怒气不够不发UseExSkill，我们直接发
-            - 同时保留SetInputOpt/DoConfirmOpt监控大招输入路径
+            ## 剑影江湖 v27.1 - 修复SetInputOpt签名
+            - **核心变更**: 修复IL2CPP静态方法签名（含隐含MethodInfo*参数）
+            - v27发现: SetInputOpt(20014,0)调用后hook没被触发，因为签名错误
+            - IL2CPP静态方法实际签名: (MethodInfo* method, Int32 optType, Int32 optData)
+            - 修复后SetInputOpt hook应能正确捕获UseExSkill输入
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
