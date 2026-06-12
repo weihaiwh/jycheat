@@ -1,4 +1,4 @@
-name: Build JYJH NoCDNoEnergy Dylib (v25.0)
+name: Build JYJH NoCDNoEnergy Dylib (v26.0)
 
 on:
   push:
@@ -77,8 +77,8 @@ jobs:
           which arm-apple-darwin11-clang || { echo "ERROR: clang not found!"; ls "$TOOLCHAIN/bin/" | head -20; exit 1; }
           ls -la "$DOBBY_LIB" || { echo "ERROR: Dobby lib not found!"; exit 1; }
           echo "=== Source file ==="
-          ls -la JYJH_NoCDNoEnergy_v25.m
-          head -5 JYJH_NoCDNoEnergy_v25.m
+          ls -la JYJH_NoCDNoEnergy_v26.m
+          head -5 JYJH_NoCDNoEnergy_v26.m
           
           echo "=== Compiling ==="
           arm-apple-darwin11-clang \
@@ -87,7 +87,7 @@ jobs:
             -isysroot "$SDK" \
             -fobjc-arc \
             -I. \
-            -c JYJH_NoCDNoEnergy_v25.m \
+            -c JYJH_NoCDNoEnergy_v26.m \
             -o JYJH_NoCDNoEnergy.o
           
           echo "Compile OK, linking with Dobby..."
@@ -130,20 +130,21 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JYJH-NoCDNoEnergy-dylib-v25.0
+          name: JYJH-NoCDNoEnergy-dylib-v26.0
           path: output/
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v25.0
+          tag_name: v26.0
           files: output/*
           body: |
-            ## 剑影江湖 v25.0 - Hook UI层IsAnger
-            - **核心变更**: Hook UIC_FHSkillItem的IsAnger/OnAngerChange
-            - v24发现: 帧同步层函数(IsExSkillInCD/TriggerExSkill/DoUseExSkill)从未被调用
-            - 原因: UI层先检查怒气，不够就不发送UseExSkill输入
-            - v25直接hook UI层: get_IsAnger→NO(不需要怒气), OnAngerChange→满怒气
-            - 这样UI层不会拦截大招点击，大招可以直接释放
+            ## 剑影江湖 v26.0 - OnUpdate修改IsAnger + SetInputOpt/DoConfirmOpt
+            - **核心变更**: Hook OnUpdate直接修改IsAnger字段 + SetInputOpt/DoConfirmOpt
+            - v25发现: get_IsAnger是泛型共享地址无法单独hook, OnAngerChange从未被调用
+            - v26: 在OnUpdate中直接修改<IsAnger>k__BackingField(0x351)=NO
+            - 同时hook SetInputOpt/DoConfirmOpt监控UseExSkill(20014)输入路径
+            - SetInputOpt: 当optType=20014时记录日志
+            - DoConfirmOpt: 监控大招确认流程
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
