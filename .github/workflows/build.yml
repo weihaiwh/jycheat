@@ -1,4 +1,4 @@
-name: Build JYJH NoCDNoEnergy Dylib (v26.0)
+name: Build JYJH NoCDNoEnergy Dylib (v27.0)
 
 on:
   push:
@@ -77,8 +77,8 @@ jobs:
           which arm-apple-darwin11-clang || { echo "ERROR: clang not found!"; ls "$TOOLCHAIN/bin/" | head -20; exit 1; }
           ls -la "$DOBBY_LIB" || { echo "ERROR: Dobby lib not found!"; exit 1; }
           echo "=== Source file ==="
-          ls -la JYJH_NoCDNoEnergy_v26.m
-          head -5 JYJH_NoCDNoEnergy_v26.m
+          ls -la JYJH_NoCDNoEnergy_v27.m
+          head -5 JYJH_NoCDNoEnergy_v27.m
           
           echo "=== Compiling ==="
           arm-apple-darwin11-clang \
@@ -87,7 +87,7 @@ jobs:
             -isysroot "$SDK" \
             -fobjc-arc \
             -I. \
-            -c JYJH_NoCDNoEnergy_v26.m \
+            -c JYJH_NoCDNoEnergy_v27.m \
             -o JYJH_NoCDNoEnergy.o
           
           echo "Compile OK, linking with Dobby..."
@@ -130,21 +130,21 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JYJH-NoCDNoEnergy-dylib-v26.0
+          name: JYJH-NoCDNoEnergy-dylib-v27.0
           path: output/
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v26.0
+          tag_name: v27.0
           files: output/*
           body: |
-            ## 剑影江湖 v26.0 - OnUpdate修改IsAnger + SetInputOpt/DoConfirmOpt
-            - **核心变更**: Hook OnUpdate直接修改IsAnger字段 + SetInputOpt/DoConfirmOpt
-            - v25发现: get_IsAnger是泛型共享地址无法单独hook, OnAngerChange从未被调用
-            - v26: 在OnUpdate中直接修改<IsAnger>k__BackingField(0x351)=NO
-            - 同时hook SetInputOpt/DoConfirmOpt监控UseExSkill(20014)输入路径
-            - SetInputOpt: 当optType=20014时记录日志
-            - DoConfirmOpt: 监控大招确认流程
+            ## 剑影江湖 v27.0 - OnClickSkill_6强制UseExSkill
+            - **核心变更**: Hook OnClickSkill_6强制发送UseExSkill(20014)输入
+            - v26发现: OnUpdate中0x351偏移读出65/176等非bool值，修改导致卡住
+            - v27移除危险的OnUpdate内存修改
+            - 新增hook: OnClickSkill_6 → 点击大招时调SetInputOpt(20014,0)
+            - 如果UI层因怒气不够不发UseExSkill，我们直接发
+            - 同时保留SetInputOpt/DoConfirmOpt监控大招输入路径
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
