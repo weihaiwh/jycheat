@@ -1,4 +1,4 @@
-name: Build JYJH AntiDetect Dylib (v2.0)
+name: Build JYJH AntiDetect Dylib (v3.0)
 
 on:
   push:
@@ -32,53 +32,18 @@ jobs:
           cd /tmp/cctools/usage_examples/ios_toolchain
           ./build.sh /tmp/iPhoneOS15.6.sdk.tar.xz arm64
 
-      - name: Build Dobby static library for iOS ARM64
+      - name: Build AntiDetect v3.0 dylib (no Dobby needed)
         run: |
           TOOLCHAIN=/tmp/cctools/usage_examples/ios_toolchain/target
           export PATH="$TOOLCHAIN/bin:$PATH"
           SDK="$TOOLCHAIN/SDK/iPhoneOS15.6.sdk"
-          
-          git clone https://github.com/jmpews/Dobby.git --depth 1 /tmp/dobby
-          
-          cat > /tmp/ios-toolchain.cmake << 'EOF'
-          set(CMAKE_SYSTEM_NAME Darwin)
-          set(CMAKE_SYSTEM_PROCESSOR arm64)
-          set(CMAKE_C_COMPILER arm-apple-darwin11-clang)
-          set(CMAKE_CXX_COMPILER arm-apple-darwin11-clang++)
-          set(CMAKE_FIND_ROOT_PATH MODE_PROGRAM NEVER)
-          set(CMAKE_FIND_ROOT_PATH MODE_LIBRARY ONLY)
-          set(CMAKE_FIND_ROOT_PATH MODE_INCLUDE ONLY)
-          EOF
-          
-          mkdir -p /tmp/dobby/build && cd /tmp/dobby/build
-          cmake .. \
-            -DCMAKE_TOOLCHAIN_FILE=/tmp/ios-toolchain.cmake \
-            -DCMAKE_C_FLAGS="-arch arm64 -miphoneos-version-min=15.0 -isysroot $SDK" \
-            -DCMAKE_CXX_FLAGS="-arch arm64 -miphoneos-version-min=15.0 -isysroot $SDK" \
-            -DDOBBY_DEBUG=OFF \
-            -DCMAKE_BUILD_TYPE=Release \
-            -G Ninja
-          
-          ninja -j$(nproc)
-          
-          find /tmp/dobby/build -name "*.a" -ls
-          echo "DOBBY_LIB=$(find /tmp/dobby/build -name 'libdobby.a' | head -1)" >> $GITHUB_ENV
-
-      - name: Build AntiDetect dylib
-        run: |
-          TOOLCHAIN=/tmp/cctools/usage_examples/ios_toolchain/target
-          export PATH="$TOOLCHAIN/bin:$PATH"
-          SDK="$TOOLCHAIN/SDK/iPhoneOS15.6.sdk"
-          DOBBY_LIB="${DOBBY_LIB:-/tmp/dobby/build/libdobby.a}"
           
           echo "=== Build Environment ==="
           echo "SDK: $SDK"
-          echo "DOBBY_LIB: $DOBBY_LIB"
           which arm-apple-darwin11-clang || { echo "ERROR: clang not found!"; ls "$TOOLCHAIN/bin/" | head -20; exit 1; }
-          ls -la "$DOBBY_LIB" || { echo "ERROR: Dobby lib not found!"; exit 1; }
           echo "=== Source file ==="
-          ls -la JYJH_AntiDetect_v2.m
-          head -5 JYJH_AntiDetect_v2.m
+          ls -la JYJH_AntiDetect_v3.m
+          head -5 JYJH_AntiDetect_v3.m
           
           echo "=== Compiling ==="
           arm-apple-darwin11-clang \
@@ -87,10 +52,10 @@ jobs:
             -isysroot "$SDK" \
             -fobjc-arc \
             -I. \
-            -c JYJH_AntiDetect_v2.m \
+            -c JYJH_AntiDetect_v3.m \
             -o JYJH_AntiDetect.o
           
-          echo "Compile OK, linking with Dobby..."
+          echo "Compile OK, linking (no Dobby)..."
           
           arm-apple-darwin11-ld \
             -arch arm64 \
@@ -108,8 +73,7 @@ jobs:
             -objc_abi_version 2 \
             -install_name @executable_path/JYJH_AntiDetect.dylib \
             -o JYJH_AntiDetect.dylib \
-            JYJH_AntiDetect.o \
-            "$DOBBY_LIB"
+            JYJH_AntiDetect.o
           
           echo "Build SUCCESS!"
           
@@ -130,23 +94,28 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JYJH-AntiDetect-dylib-v2.0
+          name: JYJH-AntiDetect-dylib-v3.0
           path: output/
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: anti-v2.0
+          tag_name: anti-v3.0
           files: output/*
           body: |
-            ## 剑影江湖 反检测 v2.0 - NTESHTPSec Bypass
-            - **v2.0修复**: DobbyHook全部FAILED ret=-1的问题
-            - 添加地址验证和重复地址检测（NTESRiskSecProtect和NetSecProtect共享地址只hook一次）
-            - 添加vm_protect重试机制（iOS 17内存保护）
-            - 添加函数字节码dump诊断
-            - 延迟5秒后再hook（等SDK初始化）
-            - 20秒后输出诊断日志
+            ## 剑影江湖 反检测 v3.0 - MethodInfo指针替换
+            - **v3.0核心**: 放弃DobbyHook，改用MethodInfo->methodPointer替换
+            - **原因**: iOS 17 PPL阻止代码段修改，DobbyHook始终FAILED
+            - **新方案**: 直接修改IL2CPP MethodInfo结构体中的methodPointer字段
+              - 修改的是堆内存数据结构，不碰__TEXT代码段
+              - PPL不管堆内存，所以不受限制
+            - Hook ioctl: Cmd_IsRootDevice(2)→"0"
+            - Hook getToken: 修改返回结果code=0
+            - Hook MyGetToken.onResult: 确保回调code=0
+            - Hook MyHtpCallback.onReceive: 强制code=0
+            - Hook isHtpExist: 返回YES
+            - 修改isInitialized静态字段为true
+            - **无需Dobby库**，dylib更小更干净
             - **适用环境**: iOS 17.0 未越狱 + 巨魔商店
-            - 日志: ~/Documents/jyjh_anti.log
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
