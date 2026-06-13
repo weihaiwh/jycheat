@@ -1,4 +1,4 @@
-name: Build JYJH NoCDNoEnergy Dylib (v28.0)
+name: Build JYJH AntiDetect Dylib (v1.0)
 
 on:
   push:
@@ -64,7 +64,7 @@ jobs:
           find /tmp/dobby/build -name "*.a" -ls
           echo "DOBBY_LIB=$(find /tmp/dobby/build -name 'libdobby.a' | head -1)" >> $GITHUB_ENV
 
-      - name: Build tweak dylib
+      - name: Build AntiDetect dylib
         run: |
           TOOLCHAIN=/tmp/cctools/usage_examples/ios_toolchain/target
           export PATH="$TOOLCHAIN/bin:$PATH"
@@ -77,8 +77,8 @@ jobs:
           which arm-apple-darwin11-clang || { echo "ERROR: clang not found!"; ls "$TOOLCHAIN/bin/" | head -20; exit 1; }
           ls -la "$DOBBY_LIB" || { echo "ERROR: Dobby lib not found!"; exit 1; }
           echo "=== Source file ==="
-          ls -la JYJH_NoCDNoEnergy_v28.m
-          head -5 JYJH_NoCDNoEnergy_v28.m
+          ls -la JYJH_AntiDetect_v1.m
+          head -5 JYJH_AntiDetect_v1.m
           
           echo "=== Compiling ==="
           arm-apple-darwin11-clang \
@@ -87,8 +87,8 @@ jobs:
             -isysroot "$SDK" \
             -fobjc-arc \
             -I. \
-            -c JYJH_NoCDNoEnergy_v28.m \
-            -o JYJH_NoCDNoEnergy.o
+            -c JYJH_AntiDetect_v1.m \
+            -o JYJH_AntiDetect.o
           
           echo "Compile OK, linking with Dobby..."
           
@@ -106,44 +106,49 @@ jobs:
             -lobjc \
             -lc++ \
             -objc_abi_version 2 \
-            -install_name @executable_path/JYJH_NoCDNoEnergy.dylib \
-            -o JYJH_NoCDNoEnergy.dylib \
-            JYJH_NoCDNoEnergy.o \
+            -install_name @executable_path/JYJH_AntiDetect.dylib \
+            -o JYJH_AntiDetect.dylib \
+            JYJH_AntiDetect.o \
             "$DOBBY_LIB"
           
           echo "Build SUCCESS!"
           
-          file JYJH_NoCDNoEnergy.dylib
-          ls -lh JYJH_NoCDNoEnergy.dylib
+          file JYJH_AntiDetect.dylib
+          ls -lh JYJH_AntiDetect.dylib
 
       - name: Sign and package
         run: |
           LDID=$(find /tmp/cctools -name "ldid" -type f | head -1)
-          [ -n "$LDID" ] && $LDID -S JYJH_NoCDNoEnergy.dylib
+          [ -n "$LDID" ] && $LDID -S JYJH_AntiDetect.dylib
           
-          echo '{ Filter = { Bundles = ( "com.jyjh.whwb" ); }; }' > JYJH_NoCDNoEnergy.plist
+          echo '{ Filter = { Bundles = ( "com.jyjh.whwb" ); }; }' > JYJH_AntiDetect.plist
           mkdir -p output
-          cp JYJH_NoCDNoEnergy.dylib JYJH_NoCDNoEnergy.plist output/
-          file output/JYJH_NoCDNoEnergy.dylib
+          cp JYJH_AntiDetect.dylib JYJH_AntiDetect.plist output/
+          file output/JYJH_AntiDetect.dylib
           ls -lh output/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JYJH-NoCDNoEnergy-dylib-v28.0
+          name: JYJH-AntiDetect-dylib-v1.0
           path: output/
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v28.0
+          tag_name: anti-v1.0
           files: output/*
           body: |
-            ## 剑影江湖 v28.0 - Hook BattleGameLogic.SetInputOpt实例方法
-            - **核心变更**: Hook正确的SetInputOpt（BattleGameLogic实例方法而非静态方法）
-            - v27发现: OnClickSkill_6被调用但SetInputOpt hook没触发
-            - 原因: 游戏内部调的是BattleGameLogic.SetInputOpt(实例方法)不是BattleInputOptHelper.SetInputOpt(静态方法)
-            - v28: 搜索SetInputOpt时匹配BattleGameLogic而非BattleInputOptHelper
-            - 签名: (void* self, int optType, int optData)
+            ## 剑影江湖 反检测 v1.0 - NTESHTPSec Bypass
+            - **核心功能**: 屏蔽网易易盾HTP反作弊系统的环境检测
+            - Hook `NTESRiskSecProtect.ioctl` → Cmd_IsRootDevice(2)返回"0"(非根设备)
+            - Hook `NTESRiskSecProtect.getToken` → 修改返回结果code=0(成功)
+            - Hook `MyGetToken.onResult` → 确保回调结果code=0
+            - Hook `MyHtpCallback.onReceive` → 强制初始化回调code=0
+            - Hook `NetSecProtect.ioctl` → 同上，第二层封装也覆盖
+            - Hook `NetSecProtect.getToken` → 同上
+            - Hook `NetSecProtect.isHtpExist` → 返回YES
+            - **适用环境**: iOS 17.0 未越狱 + 巨魔商店
+            - 无UI，自动生效（通过日志文件~/Documents/jyjh_anti.log查看运行状态）
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
