@@ -1,4 +1,4 @@
-name: Build JYJH AntiDetect Dylib (v1.0)
+name: Build JYJH AntiDetect Dylib (v2.0)
 
 on:
   push:
@@ -77,8 +77,8 @@ jobs:
           which arm-apple-darwin11-clang || { echo "ERROR: clang not found!"; ls "$TOOLCHAIN/bin/" | head -20; exit 1; }
           ls -la "$DOBBY_LIB" || { echo "ERROR: Dobby lib not found!"; exit 1; }
           echo "=== Source file ==="
-          ls -la JYJH_AntiDetect_v1.m
-          head -5 JYJH_AntiDetect_v1.m
+          ls -la JYJH_AntiDetect_v2.m
+          head -5 JYJH_AntiDetect_v2.m
           
           echo "=== Compiling ==="
           arm-apple-darwin11-clang \
@@ -87,7 +87,7 @@ jobs:
             -isysroot "$SDK" \
             -fobjc-arc \
             -I. \
-            -c JYJH_AntiDetect_v1.m \
+            -c JYJH_AntiDetect_v2.m \
             -o JYJH_AntiDetect.o
           
           echo "Compile OK, linking with Dobby..."
@@ -130,25 +130,23 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JYJH-AntiDetect-dylib-v1.0
+          name: JYJH-AntiDetect-dylib-v2.0
           path: output/
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: anti-v1.0
+          tag_name: anti-v2.0
           files: output/*
           body: |
-            ## 剑影江湖 反检测 v1.0 - NTESHTPSec Bypass
-            - **核心功能**: 屏蔽网易易盾HTP反作弊系统的环境检测
-            - Hook `NTESRiskSecProtect.ioctl` → Cmd_IsRootDevice(2)返回"0"(非根设备)
-            - Hook `NTESRiskSecProtect.getToken` → 修改返回结果code=0(成功)
-            - Hook `MyGetToken.onResult` → 确保回调结果code=0
-            - Hook `MyHtpCallback.onReceive` → 强制初始化回调code=0
-            - Hook `NetSecProtect.ioctl` → 同上，第二层封装也覆盖
-            - Hook `NetSecProtect.getToken` → 同上
-            - Hook `NetSecProtect.isHtpExist` → 返回YES
+            ## 剑影江湖 反检测 v2.0 - NTESHTPSec Bypass
+            - **v2.0修复**: DobbyHook全部FAILED ret=-1的问题
+            - 添加地址验证和重复地址检测（NTESRiskSecProtect和NetSecProtect共享地址只hook一次）
+            - 添加vm_protect重试机制（iOS 17内存保护）
+            - 添加函数字节码dump诊断
+            - 延迟5秒后再hook（等SDK初始化）
+            - 20秒后输出诊断日志
             - **适用环境**: iOS 17.0 未越狱 + 巨魔商店
-            - 无UI，自动生效（通过日志文件~/Documents/jyjh_anti.log查看运行状态）
+            - 日志: ~/Documents/jyjh_anti.log
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
