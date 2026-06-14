@@ -1,4 +1,4 @@
-name: Build JYJH AntiDetect Dylib (v3.0)
+name: Build JYJH AntiDetect Dylib (v4.0)
 
 on:
   push:
@@ -32,18 +32,15 @@ jobs:
           cd /tmp/cctools/usage_examples/ios_toolchain
           ./build.sh /tmp/iPhoneOS15.6.sdk.tar.xz arm64
 
-      - name: Build AntiDetect v3.0 dylib (no Dobby needed)
+      - name: Build AntiDetect v4.0 dylib
         run: |
           TOOLCHAIN=/tmp/cctools/usage_examples/ios_toolchain/target
           export PATH="$TOOLCHAIN/bin:$PATH"
           SDK="$TOOLCHAIN/SDK/iPhoneOS15.6.sdk"
           
           echo "=== Build Environment ==="
-          echo "SDK: $SDK"
-          which arm-apple-darwin11-clang || { echo "ERROR: clang not found!"; ls "$TOOLCHAIN/bin/" | head -20; exit 1; }
-          echo "=== Source file ==="
-          ls -la JYJH_AntiDetect_v3.m
-          head -5 JYJH_AntiDetect_v3.m
+          which arm-apple-darwin11-clang || { echo "ERROR: clang not found!"; exit 1; }
+          ls -la JYJH_AntiDetect_v4.m
           
           echo "=== Compiling ==="
           arm-apple-darwin11-clang \
@@ -52,10 +49,10 @@ jobs:
             -isysroot "$SDK" \
             -fobjc-arc \
             -I. \
-            -c JYJH_AntiDetect_v3.m \
+            -c JYJH_AntiDetect_v4.m \
             -o JYJH_AntiDetect.o
           
-          echo "Compile OK, linking (no Dobby)..."
+          echo "Compile OK, linking..."
           
           arm-apple-darwin11-ld \
             -arch arm64 \
@@ -76,7 +73,6 @@ jobs:
             JYJH_AntiDetect.o
           
           echo "Build SUCCESS!"
-          
           file JYJH_AntiDetect.dylib
           ls -lh JYJH_AntiDetect.dylib
 
@@ -88,34 +84,30 @@ jobs:
           echo '{ Filter = { Bundles = ( "com.jyjh.whwb" ); }; }' > JYJH_AntiDetect.plist
           mkdir -p output
           cp JYJH_AntiDetect.dylib JYJH_AntiDetect.plist output/
-          file output/JYJH_AntiDetect.dylib
           ls -lh output/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JYJH-AntiDetect-dylib-v3.0
+          name: JYJH-AntiDetect-dylib-v4.0
           path: output/
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: anti-v3.0
+          tag_name: anti-v4.0
           files: output/*
           body: |
-            ## 剑影江湖 反检测 v3.0 - MethodInfo指针替换
-            - **v3.0核心**: 放弃DobbyHook，改用MethodInfo->methodPointer替换
-            - **原因**: iOS 17 PPL阻止代码段修改，DobbyHook始终FAILED
-            - **新方案**: 直接修改IL2CPP MethodInfo结构体中的methodPointer字段
-              - 修改的是堆内存数据结构，不碰__TEXT代码段
-              - PPL不管堆内存，所以不受限制
-            - Hook ioctl: Cmd_IsRootDevice(2)→"0"
-            - Hook getToken: 修改返回结果code=0
-            - Hook MyGetToken.onResult: 确保回调code=0
-            - Hook MyHtpCallback.onReceive: 强制code=0
-            - Hook isHtpExist: 返回YES
-            - 修改isInitialized静态字段为true
-            - **无需Dobby库**，dylib更小更干净
+            ## 剑影江湖 反检测 v4.0 - fishhook + MethodInfo
+            - **v4.0**: 双层防护，native层fishhook + IL2CPP层MethodInfo替换
+            - **fishhook层** (修改GOT，PPL不管):
+              - stat/lstat/access/fopen/open: 隐藏越狱文件路径
+              - getenv: 清除DYLD_INSERT_LIBRARIES等注入环境变量
+            - **MethodInfo层** (修改堆内存，PPL不管):
+              - ioctl(IsRootDevice=2)→"0"
+              - getToken→patch code=0
+              - MyGetToken.onResult/MyHtpCallback.onReceive→force code=0
+              - isHtpExist→YES, isInitialized→YES
             - **适用环境**: iOS 17.0 未越狱 + 巨魔商店
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
