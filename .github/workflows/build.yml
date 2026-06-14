@@ -1,4 +1,4 @@
-name: Build JYJH AntiDetect Dylib (v4.0)
+name: Build JYJH AntiDetect Dylib (v5.0)
 
 on:
   push:
@@ -32,7 +32,7 @@ jobs:
           cd /tmp/cctools/usage_examples/ios_toolchain
           ./build.sh /tmp/iPhoneOS15.6.sdk.tar.xz arm64
 
-      - name: Build AntiDetect v4.0 dylib
+      - name: Build AntiDetect v5.0 dylib (no Dobby, no fishhook)
         run: |
           TOOLCHAIN=/tmp/cctools/usage_examples/ios_toolchain/target
           export PATH="$TOOLCHAIN/bin:$PATH"
@@ -40,7 +40,7 @@ jobs:
           
           echo "=== Build Environment ==="
           which arm-apple-darwin11-clang || { echo "ERROR: clang not found!"; exit 1; }
-          ls -la JYJH_AntiDetect_v4.m
+          ls -la JYJH_AntiDetect_v5.m
           
           echo "=== Compiling ==="
           arm-apple-darwin11-clang \
@@ -49,7 +49,7 @@ jobs:
             -isysroot "$SDK" \
             -fobjc-arc \
             -I. \
-            -c JYJH_AntiDetect_v4.m \
+            -c JYJH_AntiDetect_v5.m \
             -o JYJH_AntiDetect.o
           
           echo "Compile OK, linking..."
@@ -89,25 +89,24 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JYJH-AntiDetect-dylib-v4.0
+          name: JYJH-AntiDetect-dylib-v5.0
           path: output/
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: anti-v4.0
+          tag_name: anti-v5.0
           files: output/*
           body: |
-            ## 剑影江湖 反检测 v4.0 - fishhook + MethodInfo
-            - **v4.0**: 双层防护，native层fishhook + IL2CPP层MethodInfo替换
-            - **fishhook层** (修改GOT，PPL不管):
-              - stat/lstat/access/fopen/open: 隐藏越狱文件路径
-              - getenv: 清除DYLD_INSERT_LIBRARIES等注入环境变量
-            - **MethodInfo层** (修改堆内存，PPL不管):
-              - ioctl(IsRootDevice=2)→"0"
-              - getToken→patch code=0
-              - MyGetToken.onResult/MyHtpCallback.onReceive→force code=0
-              - isHtpExist→YES, isInitialized→YES
+            ## 剑影江湖 反检测 v5.0 - 极简MethodInfo方案
+            - **v5.0核心**: 移除fishhook(太危险导致闪退)，只保留MethodInfo替换
+            - **v4.0问题**: fishhook拦截stat/access/fopen/open→游戏无法读资源文件→闪退
+            - **v5.0改进**:
+              - 扩展hook: 增加init/getTokenAsync/NetSecProtect.init
+              - 缩短延迟: 5s→2s（反作弊更早初始化）
+              - 修改HTProtectConfig: ie/ic/isec字段
+              - 共享地址检测: 同地址只patch一次
             - **适用环境**: iOS 17.0 未越狱 + 巨魔商店
+            - **注意**: 如果native SDK用syscall直接检测，未越狱环境可能无法完全绕过
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
