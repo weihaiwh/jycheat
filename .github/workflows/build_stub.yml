@@ -1,0 +1,271 @@
+name: Build KSAdSDK Stub Framework
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'KSAdSDK_Stub.m'
+      - '.github/workflows/build_stub.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git cmake ninja-build python3 \
+            libssl-dev zlib1g-dev libxml2-dev uuid-dev libbsd-dev \
+            autoconf automake libtool pkg-config clang libc++-dev libc++abi-dev xz-utils
+
+      - name: Get iOS SDK
+        run: |
+          git clone https://github.com/theos/sdks.git --depth 1 /tmp/sdks
+          cd /tmp/sdks
+          tar -cJf /tmp/iPhoneOS15.6.sdk.tar.xz iPhoneOS15.6.sdk
+          ls -lh /tmp/iPhoneOS15.6.sdk.tar.xz
+
+      - name: Build cctools-port toolchain
+        run: |
+          git clone https://github.com/tpoechtrager/cctools-port.git --depth 1 /tmp/cctools
+          cd /tmp/cctools/usage_examples/ios_toolchain
+          ./build.sh /tmp/iPhoneOS15.6.sdk.tar.xz arm64
+
+      - name: Build KSAdSDK Stub Framework
+        run: |
+          TOOLCHAIN=/tmp/cctools/usage_examples/ios_toolchain/target
+          export PATH="$TOOLCHAIN/bin:$PATH"
+          SDK="$TOOLCHAIN/SDK/iPhoneOS15.6.sdk"
+
+          echo "=== Build Environment ==="
+          which arm-apple-darwin11-clang || { echo "ERROR: clang not found!"; exit 1; }
+          ls -la KSAdSDK_Stub.m
+
+          echo "=== Compiling ==="
+          arm-apple-darwin11-clang \
+            -arch arm64 \
+            -miphoneos-version-min=15.0 \
+            -isysroot "$SDK" \
+            -fobjc-arc \
+            -I. \
+            -c KSAdSDK_Stub.m \
+            -o KSAdSDK_Stub.o
+
+          echo "Compile OK, linking..."
+
+          # Link as dylib with install_name matching framework path
+          arm-apple-darwin11-ld \
+            -arch arm64 \
+            -iphoneos_version_min 15.0 \
+            -syslibroot "$SDK" \
+            -dynamic \
+            -dylib \
+            -framework Foundation \
+            -lSystem \
+            -lobjc \
+            -objc_abi_version 2 \
+            -install_name @executable_path/Frameworks/KSAdSDK.framework/KSAdSDK \
+            -o KSAdSDK \
+            KSAdSDK_Stub.o
+
+          echo "Build SUCCESS!"
+          file KSAdSDK
+          ls -lh KSAdSDK
+
+          # Verify exported symbols
+          echo "=== Exported ObjC Classes ==="
+          nm -gU KSAdSDK 2>/dev/null | grep "OBJC_CLASS" || echo "(nm not available, skipping check)"
+
+      - name: Create Framework bundle
+        run: |
+          LDID=$(find /tmp/cctools -name "ldid" -type f | head -1)
+
+          # Sign the dylib
+          [ -n "$LDID" ] && $LDID -S KSAdSDK
+
+          # Create framework directory structure
+          mkdir -p output/KSAdSDK.framework
+
+          # Info.plist for the framework
+          cat > output/KSAdSDK.framework/Info.plist << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleExecutable</key>
+            <string>KSAdSDK</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.kwai.ksad-sdk</string>
+            <key>CFBundleName</key>
+            <string>KSAdSDK</string>
+            <key>CFBundlePackageType</key>
+            <string>FMWK</string>
+            <key>CFBundleShortVersionString</key>
+            <string>3.3.3</string>
+            <key>CFBundleVersion</key>
+            <string>3.3.3</string>
+            <key>MinimumOSVersion</key>
+            <string>15.0</string>
+            <key>DTPlatformName</key>
+            <string>iphoneos</string>
+          </dict>
+          </plist>
+          PLIST
+
+          # Copy binary into framework
+          cp KSAdSDK output/KSAdSDK.framework/KSAdSDK
+
+          # Also create a standalone IPA patch script
+          cat > output/patch_ipa.sh << 'SCRIPT'
+          #!/bin/bash
+          # patch_ipa.sh - 用空壳KSAdSDK替换IPA中的原始版本
+          # 用法: ./patch_ipa.sh <原始IPA路径>
+          #
+          # 前置条件:
+          #   1. 解密/脱壳IPA (frida/monkeydev等)
+          #   2. 此脚本和KSAdSDK.framework在同一目录
+          #   3. 签名证书已配置 ( TrollStore或自签 )
+          #
+          # 步骤:
+          #   1. 解压IPA
+          #   2. 删除原始KSAdSDK.framework
+          #   3. 复制空壳KSAdSDK.framework
+          #   4. 删除CydiaSubstrate.framework (TrollFools注入残留)
+          #   5. 删除JYJH_AntiDetect.dylib (旧反检测dylib)
+          #   6. 重签名并打包
+
+          set -e
+
+          IPA="$1"
+          if [ -z "$IPA" ]; then
+            echo "用法: $0 <原始IPA路径>"
+            exit 1
+          fi
+
+          WORKDIR=$(mktemp -d)
+          echo "工作目录: $WORKDIR"
+
+          # 解压IPA
+          echo "=== 解压IPA ==="
+          unzip -q "$IPA" -d "$WORKDIR/ipa"
+
+          # 找到.app目录
+          APPDIR=$(find "$WORKDIR/ipa/Payload" -name "*.app" -type d | head -1)
+          if [ -z "$APPDIR" ]; then
+            echo "ERROR: 未找到.app目录"
+            exit 1
+          fi
+          echo "App目录: $APPDIR"
+
+          FWDIR="$APPDIR/Frameworks"
+
+          # 删除原始KSAdSDK.framework
+          echo "=== 删除原始KSAdSDK.framework ==="
+          rm -rf "$FWDIR/KSAdSDK.framework"
+
+          # 复制空壳KSAdSDK.framework
+          echo "=== 复制空壳KSAdSDK.framework ==="
+          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+          cp -r "$SCRIPT_DIR/KSAdSDK.framework" "$FWDIR/KSAdSDK.framework"
+
+          # 删除注入残留
+          echo "=== 清理注入残留 ==="
+          rm -f "$FWDIR/CydiaSubstrate.framework" 2>/dev/null || true
+          rm -f "$FWDIR/JYJH_AntiDetect.dylib" 2>/dev/null || true
+
+          # 列出Frameworks
+          echo "=== Frameworks目录 ==="
+          ls -la "$FWDIR/" | head -20
+
+          # 重签名 (需要ldid或codesign)
+          echo "=== 重签名 ==="
+          LDID=$(which ldid 2>/dev/null)
+          if [ -n "$LDID" ]; then
+            find "$APPDIR" -name "*.dylib" -o -name "*.framework" | while read f; do
+              $LDID -S "$f" 2>/dev/null || true
+            done
+            $LDID -S "$APPDIR/$(basename "$APPDIR" .app)" 2>/dev/null || true
+            echo "ldid签名完成"
+          else
+            echo "WARNING: ldid未找到，跳过签名。请手动用codesign重签名。"
+          fi
+
+          # 打包
+          OUTPUT_IPA="$(basename "$IPA" .ipa)_stub.ipa"
+          echo "=== 打包 ==="
+          cd "$WORKDIR/ipa"
+          zip -qry "$OLDPWD/$OUTPUT_IPA" .
+          cd "$OLDPWD"
+
+          echo "=== 完成 ==="
+          echo "输出: $OUTPUT_IPA"
+          ls -lh "$OUTPUT_IPA"
+
+          # 清理
+          rm -rf "$WORKDIR"
+          SCRIPT
+
+          chmod +x output/patch_ipa.sh
+
+          ls -lhR output/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: KSAdSDK-Stub-Framework
+          path: output/
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ksadsdk-stub-v1.0
+          files: output/KSAdSDK.framework/KSAdSDK
+          body: |
+            ## KSAdSDK 空壳 Framework v1.0
+
+            替换原始KSAdSDK.framework，消除KSUWeapon/ADDFPSecurityTool等检测逻辑。
+
+            ### 原理
+            - 只导出游戏(UnityFramework)实际需要的9个符号
+            - KSUWeapon、ADDFPSecurityTool、ADDeviceFingerPrint等检测类完全不存在
+            - 广告SDK功能不初始化（游戏本身是内购游戏，不依赖广告）
+            - 不注入dylib，不修改UnityFramework二进制
+
+            ### 导出的符号
+            **字符串常量:**
+            - `_KSAdADNNameBaidu` → @"baidu"
+            - `_KSAdADNNameChuanshanjia` → @"chuanshanjia"
+            - `_KSAdADNNameOther` → @"other"
+
+            **ObjC类 (6个):**
+            - `KSAdBiddingAdV2Model` - 空数据模型
+            - `KSAdExposureReportParam` - 空数据模型
+            - `KSAdExtraDataModel` - 空数据模型
+            - `KSAdNativeAdExtraDataModel` - 空数据模型
+            - `KSAdSDKConfiguration` - 空配置(appId/showDebugLog)
+            - `KSAdSDKManager` - 空实现(startWithConfig为no-op)
+
+            ### 使用方法
+            1. 下载KSAdSDK.framework和patch_ipa.sh
+            2. 放在同一目录
+            3. 运行: `./patch_ipa.sh 原始IPA.ipa`
+            4. 用TrollStore安装生成的_stub.ipa
+
+            ### 消除的检测
+            - ✅ KSUWeapon (dylib枚举/Frida/Substrate检测)
+            - ✅ ADDFPSecurityTool (安全工具检测)
+            - ✅ ADDeviceFingerPrint (设备指纹+越狱检测)
+            - ✅ KSAdSafeGuardManager (安全守卫)
+            - ✅ _dyld_image_count/_dyld_register_func_for_add_image (KSAdSDK内的调用)
+
+            ### 不解决的检测
+            - ❌ UnityFramework内嵌的NTESHTPSec native检测
+            - ❌ UnityFramework内嵌的GDTDeviceManager.isJailBroken
+            - ❌ UnityFramework直接调用_dyld_image_count
+            这些检测在UnityFramework二进制内部，替换KSAdSDK无法消除
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
