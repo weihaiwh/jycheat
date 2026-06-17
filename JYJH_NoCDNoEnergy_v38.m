@@ -87,7 +87,7 @@ static void dumpCF(void *cf, int stateType, const char *source) {
         for (int j = 0; j < 16; j++) pos += snprintf(hex+pos, sizeof(hex)-pos, "%02x", p[i+j]);
         pos += snprintf(hex+pos, sizeof(hex)-pos, " ");
     }
-    jlog(@"CFDump[%d] %s st=%d cf=%p camp=%d isAI=%d %s", g_isPlayerLogCount, source, stateType, cf, camp24, isAI44, isAI44==0 ? @"\U00002605玩家!" : @"(怪)");
+    jlog(@"CFDump[%d] %s st=%d cf=%p camp=%d isAI=%d %s", g_isPlayerLogCount, source, stateType, cf, camp24, isAI44, isAI44==0 ? "\u2605\u73a9\u5bb6!" : "(\u602a)");
     jlog(@"  %s", hex);
 }
 
@@ -249,7 +249,7 @@ static void hookOneFunc(void *funcAddr, void *hookFunc, void **origFunc, BOOL *h
 
 static void applyAllHooks(void) {
     if (!g_funcCheckSkillUnlock) findIL2CPP();
-    hookOneFunc(g_funcLimitDmg, hookLimitDmg, (void**)&g_origLimitDmg, &g_limitHooked, @"\U00004f24\U00005bb3\U00004e0a\U00009650");
+    hookOneFunc(g_funcLimitDmg, hookLimitDmg, (void**)&g_origLimitDmg, &g_limitHooked, "\xe4\xbc\xa4\xe5\xae\xb3\xe4\xb8\x8a\xe9\x99\x90");
     jlog(@"applyAllHooks done");
 }
 
@@ -301,15 +301,15 @@ static void togglePanel(UIView *bv) {
 + (instancetype)shared { static JYJHActionHandler *s; static dispatch_once_t o; dispatch_once(&o,^{s=[[self alloc]init];}); return s; }
 - (void)onIgnoreUnlock {
     g_ignoreUnlock=!g_ignoreUnlock;
-    if (g_ignoreUnlock && !g_skillUnlockHooked) { findIL2CPP(); hookOneFunc(g_funcCheckSkillUnlock, hookCheckSkillUnlock, (void**)&g_origCheckSkillUnlock, &g_skillUnlockHooked, @"\U00005ffd\U00007565\U000089e3\U00009501"); }
+    if (g_ignoreUnlock && !g_skillUnlockHooked) { findIL2CPP(); hookOneFunc(g_funcCheckSkillUnlock, hookCheckSkillUnlock, (void**)&g_origCheckSkillUnlock, &g_skillUnlockHooked, "\xe5\xbf\xbd\xe7\x95\xa5\xe8\xa7\xa3\xe9\x94\x81"); }
     refreshButtons(); jlog(@"Toggle \U00005ffd\U00007565\U000089e3\U00009501: %d", g_ignoreUnlock);
 }
 - (void)onExSkillNoCD {
     g_exSkillNoCD=!g_exSkillNoCD;
     if (g_exSkillNoCD) {
         findIL2CPP();
-        if (!g_isReadyHooked) hookOneFunc(g_funcCheckSkillIsReady, hookCheckSkillIsReady, (void**)&g_origCheckSkillIsReady, &g_isReadyHooked, @"IsReady");
-        if (!g_attackCanUseHooked) hookOneFunc(g_funcCheckSkillAttackCanUse, hookCheckSkillAttackCanUse, (void**)&g_origCheckSkillAttackCanUse, &g_attackCanUseHooked, @"AttackCanUse");
+        if (!g_isReadyHooked) hookOneFunc(g_funcCheckSkillIsReady, hookCheckSkillIsReady, (void**)&g_origCheckSkillIsReady, &g_isReadyHooked, "IsReady");
+        if (!g_attackCanUseHooked) hookOneFunc(g_funcCheckSkillAttackCanUse, hookCheckSkillAttackCanUse, (void**)&g_origCheckSkillAttackCanUse, &g_attackCanUseHooked, "AttackCanUse");
     }
     refreshButtons(); jlog(@"Toggle \U00006280\U000080fd\U000065e0CD: %d", g_exSkillNoCD);
 }
@@ -317,10 +317,10 @@ static void togglePanel(UIView *bv) {
     g_godMode=!g_godMode;
     if (g_godMode) {
         findIL2CPP();
-        if (!g_attackCanUseHooked) hookOneFunc(g_funcCheckSkillAttackCanUse, hookCheckSkillAttackCanUse, (void**)&g_origCheckSkillAttackCanUse, &g_attackCanUseHooked, @"AttackCanUse(God)");
-        if (!g_isReadyHooked) hookOneFunc(g_funcCheckSkillIsReady, hookCheckSkillIsReady, (void**)&g_origCheckSkillIsReady, &g_isReadyHooked, @"IsReady(God)");
-        if (!g_canBeAttackHooked) hookOneFunc(g_funcCanBeAttack, hookCanBeAttack, (void**)&g_origCanBeAttack, &g_canBeAttackHooked, @"CanBeAttack★");
-        if (!g_damageHooked) hookOneFunc(g_funcDamage, hookDamage, (void**)&g_origDamage, &g_damageHooked, @"Damage★");
+        if (!g_attackCanUseHooked) hookOneFunc(g_funcCheckSkillAttackCanUse, hookCheckSkillAttackCanUse, (void**)&g_origCheckSkillAttackCanUse, &g_attackCanUseHooked, "AttackCanUse(God)");
+        if (!g_isReadyHooked) hookOneFunc(g_funcCheckSkillIsReady, hookCheckSkillIsReady, (void**)&g_origCheckSkillIsReady, &g_isReadyHooked, "IsReady(God)");
+        if (!g_canBeAttackHooked) hookOneFunc(g_funcCanBeAttack, hookCanBeAttack, (void**)&g_origCanBeAttack, &g_canBeAttackHooked, "CanBeAttack");
+        if (!g_damageHooked) hookOneFunc(g_funcDamage, hookDamage, (void**)&g_origDamage, &g_damageHooked, "Damage");
         jlog(@"GodMode: Hook CanBeAttack+Damage");
     }
     refreshButtons(); jlog(@"Toggle \U000073a9\U00005bb6\U00004e0d\U00006b7b: %d playerCF=%p learned=%d", g_godMode, g_playerCF, g_playerCFLearned);
@@ -330,7 +330,7 @@ static void togglePanel(UIView *bv) {
     if (g_fullScreen) {
         findIL2CPP();
         // v38核心: Hook FPBounds2.Intersects
-        if (!g_intersectsHooked) hookOneFunc(g_funcIntersects, hookIntersects, (void**)&g_origIntersects, &g_intersectsHooked, @"Intersects★\U00005574\U00005c4f");
+        if (!g_intersectsHooked) hookOneFunc(g_funcIntersects, hookIntersects, (void**)&g_origIntersects, &g_intersectsHooked, "Intersects(FullScreen)");
         jlog(@"FullScreen: Hook Intersects(\U000051fb\U000078b0\U000068c0\U00006d4b\U000059cb\U00007ec8\U0000901a\U00008fc7)");
     }
     refreshButtons(); jlog(@"Toggle \U00005574\U00005c4f\U000079d2\U00006480: %d", g_fullScreen);
