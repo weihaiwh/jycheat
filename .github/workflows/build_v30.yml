@@ -36,15 +36,49 @@ jobs:
           cd /tmp/cctools/usage_examples/ios_toolchain
           ./build.sh /tmp/iPhoneOS15.6.sdk.tar.xz arm64
 
-      - name: Build JYJH v30.0 dylib
+      - name: Build Dobby static library for iOS ARM64
         run: |
           TOOLCHAIN=/tmp/cctools/usage_examples/ios_toolchain/target
           export PATH="$TOOLCHAIN/bin:$PATH"
           SDK="$TOOLCHAIN/SDK/iPhoneOS15.6.sdk"
 
+          git clone https://github.com/jmpews/Dobby.git --depth 1 /tmp/dobby
+
+          cat > /tmp/ios-toolchain.cmake << 'EOF'
+          set(CMAKE_SYSTEM_NAME Darwin)
+          set(CMAKE_SYSTEM_PROCESSOR arm64)
+          set(CMAKE_C_COMPILER arm-apple-darwin11-clang)
+          set(CMAKE_CXX_COMPILER arm-apple-darwin11-clang++)
+          set(CMAKE_FIND_ROOT_PATH MODE_PROGRAM NEVER)
+          set(CMAKE_FIND_ROOT_PATH MODE_LIBRARY ONLY)
+          set(CMAKE_FIND_ROOT_PATH MODE_INCLUDE ONLY)
+          EOF
+
+          mkdir -p /tmp/dobby/build && cd /tmp/dobby/build
+          cmake .. \
+            -DCMAKE_TOOLCHAIN_FILE=/tmp/ios-toolchain.cmake \
+            -DCMAKE_C_FLAGS="-arch arm64 -miphoneos-version-min=15.0 -isysroot $SDK" \
+            -DCMAKE_CXX_FLAGS="-arch arm64 -miphoneos-version-min=15.0 -isysroot $SDK" \
+            -DDOBBY_DEBUG=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -G Ninja
+
+          ninja -j$(nproc)
+
+          find /tmp/dobby/build -name "*.a" -ls
+          echo "DOBBY_LIB=$(find /tmp/dobby/build -name 'libdobby.a' | head -1)" >> $GITHUB_ENV
+
+      - name: Build JYJH v30.0 dylib
+        run: |
+          TOOLCHAIN=/tmp/cctools/usage_examples/ios_toolchain/target
+          export PATH="$TOOLCHAIN/bin:$PATH"
+          SDK="$TOOLCHAIN/SDK/iPhoneOS15.6.sdk"
+          DOBBY_LIB="${DOBBY_LIB:-/tmp/dobby/build/libdobby.a}"
+
           echo "=== Build Environment ==="
           which arm-apple-darwin11-clang || { echo "ERROR: clang not found!"; exit 1; }
           ls -la JYJH_NoCDNoEnergy_v30.m dobby.h
+          ls -la "$DOBBY_LIB" || { echo "ERROR: Dobby lib not found!"; exit 1; }
 
           echo "=== Compiling ==="
           arm-apple-darwin11-clang \
@@ -56,7 +90,7 @@ jobs:
             -c JYJH_NoCDNoEnergy_v30.m \
             -o JYJH_v30.o
 
-          echo "Compile OK, linking..."
+          echo "Compile OK, linking with Dobby..."
 
           arm-apple-darwin11-ld \
             -arch arm64 \
@@ -74,7 +108,8 @@ jobs:
             -objc_abi_version 2 \
             -install_name @executable_path/JYJH_NoCDNoEnergy.dylib \
             -o JYJH_NoCDNoEnergy.dylib \
-            JYJH_v30.o
+            JYJH_v30.o \
+            "$DOBBY_LIB"
 
           echo "Build SUCCESS!"
           file JYJH_NoCDNoEnergy.dylib
