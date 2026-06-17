@@ -1,0 +1,132 @@
+name: Build JYJH v30.0 Dylib
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'JYJH_NoCDNoEnergy_v30.m'
+      - 'dobby.h'
+      - '.github/workflows/build_v30.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git cmake ninja-build python3 \
+            libssl-dev zlib1g-dev libxml2-dev uuid-dev libbsd-dev \
+            autoconf automake libtool pkg-config clang libc++-dev libc++abi-dev xz-utils
+
+      - name: Get iOS SDK
+        run: |
+          git clone https://github.com/theos/sdks.git --depth 1 /tmp/sdks
+          cd /tmp/sdks
+          tar -cJf /tmp/iPhoneOS15.6.sdk.tar.xz iPhoneOS15.6.sdk
+          ls -lh /tmp/iPhoneOS15.6.sdk.tar.xz
+
+      - name: Build cctools-port toolchain
+        run: |
+          git clone https://github.com/tpoechtrager/cctools-port.git --depth 1 /tmp/cctools
+          cd /tmp/cctools/usage_examples/ios_toolchain
+          ./build.sh /tmp/iPhoneOS15.6.sdk.tar.xz arm64
+
+      - name: Build JYJH v30.0 dylib
+        run: |
+          TOOLCHAIN=/tmp/cctools/usage_examples/ios_toolchain/target
+          export PATH="$TOOLCHAIN/bin:$PATH"
+          SDK="$TOOLCHAIN/SDK/iPhoneOS15.6.sdk"
+
+          echo "=== Build Environment ==="
+          which arm-apple-darwin11-clang || { echo "ERROR: clang not found!"; exit 1; }
+          ls -la JYJH_NoCDNoEnergy_v30.m dobby.h
+
+          echo "=== Compiling ==="
+          arm-apple-darwin11-clang \
+            -arch arm64 \
+            -miphoneos-version-min=15.0 \
+            -isysroot "$SDK" \
+            -fobjc-arc \
+            -I. \
+            -c JYJH_NoCDNoEnergy_v30.m \
+            -o JYJH_v30.o
+
+          echo "Compile OK, linking..."
+
+          arm-apple-darwin11-ld \
+            -arch arm64 \
+            -iphoneos_version_min 15.0 \
+            -syslibroot "$SDK" \
+            -dynamic \
+            -dylib \
+            -framework Foundation \
+            -framework UIKit \
+            -framework CoreGraphics \
+            -framework CoreFoundation \
+            -lSystem \
+            -lobjc \
+            -lc++ \
+            -objc_abi_version 2 \
+            -install_name @executable_path/JYJH_NoCDNoEnergy.dylib \
+            -o JYJH_NoCDNoEnergy.dylib \
+            JYJH_v30.o
+
+          echo "Build SUCCESS!"
+          file JYJH_NoCDNoEnergy.dylib
+          ls -lh JYJH_NoCDNoEnergy.dylib
+
+      - name: Sign and package
+        run: |
+          LDID=$(find /tmp/cctools -name "ldid" -type f | head -1)
+          [ -n "$LDID" ] && $LDID -S JYJH_NoCDNoEnergy.dylib
+
+          mkdir -p output
+          cp JYJH_NoCDNoEnergy.dylib JYJH_NoCDNoEnergy.plist output/
+          ls -lh output/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JYJH-v30.0-dylib
+          path: output/
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v30.0
+          files: output/*
+          body: |
+            ## 剑影江湖 v30.0 - Hook TriggerExSkill + 修改怒气值
+
+            ### v30核心新思路
+            Hook `ExSkillHelper.TriggerExSkill`（帧同步内层执行函数），在触发大招前将 `ExSkillData.Data`（怒气值）填满。
+
+            ### 与v22的区别
+            - v22: hook外层 `TryTriggerExSkill` 强制返回YES → 无法绕过帧同步内部检查
+            - v30: hook内层 `TriggerExSkill`，直接修改 `ExSkillData*` 指针指向的怒气数据 → 从帧同步内部绕过
+
+            ### 3个独立功能按钮
+            1. **忽略解锁** - CheckSkillUnlock返回YES
+            2. **技能无CD** - CheckSkillIsReady/AttackCanUse对普通技能返回YES
+            3. **大招怒气** - TriggerExSkill内修改ExSkillData.Data + IsReady/AttackCanUse对大招返回YES
+
+            ### ExSkillData结构体
+            ```
+            +0x10: Int16 lv
+            +0x14: Int32 id
+            +0x18: FP Data (怒气值)
+            +0x20: FP LastTriggerTime
+            +0x28: UInt64 skills
+            ```
+            Data.RawValue在skillp+0x28，满怒气设为131072000(=2000*65536)
+
+            ### 适用环境
+            - iOS 15.6 Dopamine越狱
+            - Theos + Dobby inline hook
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
