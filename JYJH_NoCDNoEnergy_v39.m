@@ -16,6 +16,7 @@
 #import <mach/mach.h>
 #import <dispatch/dispatch.h>
 #import <UIKit/UIKit.h>
+#import <QuartzCore/QuartzCore.h>
 #import <stdio.h>
 #import <string.h>
 #import <dlfcn.h>
@@ -250,6 +251,8 @@ static void applyAllHooks(void) {
 }
 
 // ===== ImGui-style UI =====
+@class JYJHActionHandler;
+
 static UIView *g_panel = nil;
 static UIButton *g_btnIgnoreUnlock = nil;
 static UIButton *g_btnExSkillNoCD = nil;
@@ -278,7 +281,8 @@ static UIButton* makeImguiBtn(CGRect frame, SEL action) {
     b.layer.cornerRadius = 4;
     b.layer.borderWidth = 1;
     b.layer.borderColor = IMGUI_BORDER.CGColor;
-    b.titleLabel.font = [UIFont fontWithName:@"Menlo-Bold" size:12] ?: [UIFont boldSystemFontOfSize:12];
+    UIFont *btnFont = [UIFont boldSystemFontOfSize:12];
+    b.titleLabel.font = btnFont;
     b.titleLabel.textColor = IMGUI_TEXT;
     [b addTarget:[JYJHActionHandler shared] action:action forControlEvents:UIControlEventTouchUpInside];
     return b;
@@ -405,10 +409,6 @@ static void togglePanel(UIView *bv) {
     l.text=@"\xe5\x89\x91"; l.textColor=[UIColor whiteColor];
     l.font=[UIFont boldSystemFontOfSize:16]; l.textAlignment=NSTextAlignmentCenter;
     [self addSubview:l];
-    // Subtle glow
-    self.layer.shadowColor=IMGUI_ACCENT.CGColor;
-    self.layer.shadowRadius=6; self.layer.shadowOpacity=0.5;
-    self.layer.shadowOffset=CGSizeMake(0,0);
     }
     return self;
 }
@@ -420,15 +420,9 @@ static void togglePanel(UIView *bv) {
 @end
 
 static UIWindow *getKeyWindow(void) {
-    if (@available(iOS 15.0, *)) {
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if (scene.activationState == UISceneActivationStateForegroundActive && [scene isKindOfClass:[UIWindowScene class]]) {
-                for (UIWindow *w in ((UIWindowScene *)scene).windows) { if (w.isKeyWindow && !w.isHidden) return w; }
-                for (UIWindow *w in ((UIWindowScene *)scene).windows) { if (!w.isHidden) return w; }
-            }
-        }
+    for (UIWindow *w in [UIApplication sharedApplication].windows) {
+        if (!w.isHidden) return w;
     }
-    for (UIWindow *w in [UIApplication sharedApplication].windows) { if (w.isKeyWindow && !w.isHidden) return w; }
     return nil;
 }
 
@@ -454,7 +448,7 @@ static void setupUI(void) {
 
     UILabel *title=[[UILabel alloc]initWithFrame:CGRectMake(8,4,pw-16,20)];
     title.text=@"  \xe5\x89\x91\xe5\xbd\xb1\xe6\xb1\x9f\xe6\xb9\x96 v39.0"; title.textColor=IMGUI_ACCENT;
-    title.font=[UIFont fontWithName:@"Menlo-Bold" size:13] ?: [UIFont boldSystemFontOfSize:13];
+    title.font=[UIFont boldSystemFontOfSize:13];
     title.textAlignment=NSTextAlignmentLeft; [titleBar addSubview:title];
 
     // Buttons - ImGui toggle style
@@ -474,15 +468,11 @@ static void setupUI(void) {
     g_sliderLabel=[[UILabel alloc]initWithFrame:CGRectMake(bx,sy,bw,16)];
     g_sliderLabel.text=[NSString stringWithFormat:@"\xe4\xbc\xa4\xe5\xae\xb3\xe4\xb8\x8a\xe9\x99\x90: %d", g_damageLimit];
     g_sliderLabel.textColor=IMGUI_DIMTEXT;
-    g_sliderLabel.font=[UIFont fontWithName:@"Menlo" size:11] ?: [UIFont systemFontOfSize:11];
+    g_sliderLabel.font=[UIFont systemFontOfSize:11];
     [g_panel addSubview:g_sliderLabel];
 
     g_slider=[[UISlider alloc]initWithFrame:CGRectMake(bx,sy+18,bw,24)];
     g_slider.minimumValue=1; g_slider.maximumValue=5000; g_slider.value=g_damageLimit;
-    // ImGui-style slider tint
-    g_slider.minimumTrackTintColor=IMGUI_ACCENT;
-    g_slider.maximumTrackTintColor=[UIColor colorWithRed:0.2 green:0.2 blue:0.25 alpha:1.0];
-    [g_slider setThumbTintColor:[UIColor whiteColor]];
     [g_slider addTarget:[JYJHActionHandler shared] action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
     [g_panel addSubview:g_slider];
 
