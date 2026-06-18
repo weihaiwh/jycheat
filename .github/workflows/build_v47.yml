@@ -1,0 +1,115 @@
+name: Build JYJH v47.0 Dylib
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'JYJH_NoCDNoEnergy_v47.m'
+      - 'dobby.h'
+      - '.github/workflows/build_v47.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git cmake ninja-build python3 \
+            libssl-dev zlib1g-dev libxml2-dev uuid-dev libbsd-dev \
+            autoconf automake libtool pkg-config clang libc++-dev libc++abi-dev xz-utils
+
+      - name: Get iOS SDK
+        run: |
+          git clone https://github.com/theos/sdks.git --depth 1 /tmp/sdks
+          cd /tmp/sdks
+          tar -cJf /tmp/iPhoneOS15.6.sdk.tar.xz iPhoneOS15.6.sdk
+          ls -lh /tmp/iPhoneOS15.6.sdk.tar.xz
+
+      - name: Build cctools-port toolchain
+        run: |
+          git clone https://github.com/tpoechtrager/cctools-port.git --depth 1 /tmp/cctools
+          cd /tmp/cctools/usage_examples/ios_toolchain
+          ./build.sh /tmp/iPhoneOS15.6.sdk.tar.xz arm64
+
+      - name: Build Dobby static library for iOS ARM64
+        run: |
+          TOOLCHAIN=/tmp/cctools/usage_examples/ios_toolchain/target
+          export PATH="$TOOLCHAIN/bin:$PATH"
+          SDK="$TOOLCHAIN/SDK/iPhoneOS15.6.sdk"
+          git clone https://github.com/jmpews/Dobby.git --depth 1 /tmp/dobby
+          cat > /tmp/ios-toolchain.cmake << 'EOF'
+          set(CMAKE_SYSTEM_NAME Darwin)
+          set(CMAKE_SYSTEM_PROCESSOR arm64)
+          set(CMAKE_C_COMPILER arm-apple-darwin11-clang)
+          set(CMAKE_CXX_COMPILER arm-apple-darwin11-clang++)
+          set(CMAKE_FIND_ROOT_PATH MODE_PROGRAM NEVER)
+          set(CMAKE_FIND_ROOT_PATH MODE_LIBRARY ONLY)
+          set(CMAKE_FIND_ROOT_PATH MODE_INCLUDE ONLY)
+          EOF
+          mkdir -p /tmp/dobby/build && cd /tmp/dobby/build
+          cmake .. -DCMAKE_TOOLCHAIN_FILE=/tmp/ios-toolchain.cmake \
+            -DCMAKE_C_FLAGS="-arch arm64 -miphoneos-version-min=15.0 -isysroot $SDK" \
+            -DCMAKE_CXX_FLAGS="-arch arm64 -miphoneos-version-min=15.0 -isysroot $SDK" \
+            -DDOBBY_DEBUG=OFF -DCMAKE_BUILD_TYPE=Release -G Ninja
+          ninja -j$(nproc)
+          echo "DOBBY_LIB=$(find /tmp/dobby/build -name 'libdobby.a' | head -1)" >> $GITHUB_ENV
+
+      - name: Build JYJH v47.0 dylib
+        run: |
+          TOOLCHAIN=/tmp/cctools/usage_examples/ios_toolchain/target
+          export PATH="$TOOLCHAIN/bin:$PATH"
+          SDK="$TOOLCHAIN/SDK/iPhoneOS15.6.sdk"
+          DOBBY_LIB="${DOBBY_LIB:-/tmp/dobby/build/libdobby.a}"
+          which arm-apple-darwin11-clang || { echo "ERROR: clang not found!"; exit 1; }
+          ls -la JYJH_NoCDNoEnergy_v47.m dobby.h "$DOBBY_LIB"
+          arm-apple-darwin11-clang -arch arm64 -miphoneos-version-min=15.0 -isysroot "$SDK" \
+            -fobjc-arc -Wno-deprecated-declarations -Wno-unguarded-availability -I. \
+            -c JYJH_NoCDNoEnergy_v47.m -o JYJH_v47.o
+          arm-apple-darwin11-ld -arch arm64 -iphoneos_version_min 15.0 -syslibroot "$SDK" \
+            -dynamic -dylib -framework Foundation -framework UIKit -framework CoreGraphics \
+            -framework CoreFoundation -framework QuartzCore -lSystem -lobjc -lc++ \
+            -objc_abi_version 2 -install_name @executable_path/JYJH_NoCDNoEnergy.dylib \
+            -o JYJH_NoCDNoEnergy.dylib JYJH_v47.o "$DOBBY_LIB"
+          file JYJH_NoCDNoEnergy.dylib && ls -lh JYJH_NoCDNoEnergy.dylib
+
+      - name: Sign and package
+        run: |
+          LDID=$(find /tmp/cctools -name "ldid" -type f | head -1)
+          [ -n "$LDID" ] && $LDID -S JYJH_NoCDNoEnergy.dylib
+          mkdir -p output
+          cp JYJH_NoCDNoEnergy.dylib JYJH_NoCDNoEnergy.plist output/
+          ls -lh output/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JYJH-v47.0-dylib
+          path: output/
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v47.0
+          files: output/*
+          body: |
+            ## v47.0 - 真全屏秒杀(DecreaseHP扩散) + Resize时更新ScrollView
+
+            ### 修复
+            1. **v46全屏只能打水平线** - hitBound扩大方案只能命中3-4个敌人(一条线)
+               - v47: 玩家攻击命中1个敌人时,对所有已知敌人调用DecreaseHP直接扣血
+               - 实现真全屏秒杀(不依赖碰撞检测,直接扣HP)
+            2. **Resize时ScrollView不更新** - 拖动右下角改变面板大小时,滚动区域不变
+               - v47: Resize时同步更新ScrollView的frame(0,32,nw,nh-32)和contentSize
+               - 保存g_scrollView全局引用用于动态更新
+
+            ### 技术细节
+            - DecreaseHP扩散: hDamage中检测到玩家攻击命中后,遍历g_enemyCFs[]数组对所有存活敌人调用g_origDecreaseHP
+            - 不破坏帧同步: DecreaseHP是帧同步内部函数,直接调用不会被回滚
+            - 移除v46的GetCurSpineAnimationInfo Hook(hitBound扩大方案已废弃)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
