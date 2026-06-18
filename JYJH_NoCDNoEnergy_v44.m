@@ -168,6 +168,10 @@ static void findIL2CPP(void) {
         size_t cnt=class_count?class_count(img):0;
         for(size_t c=0;c<cnt;c++){
             void *klass=get_class(img,c); if(!klass)continue;
+            const char *cn=class_name_func?class_name_func(klass):NULL;
+            if(cn&&strcmp(cn,"Actor")==0&&!g_classActor){
+                g_classActor=klass; jlog(@"FOUND class Actor=%p",klass);
+            }
             // v44: Tables类 - 用namespace过滤找cfg.Tables(不是Dictionary内部Tables)
             if(cn&&strcmp(cn,"Tables")==0&&!classTables){
                 // 检查namespace是否为"cfg"
