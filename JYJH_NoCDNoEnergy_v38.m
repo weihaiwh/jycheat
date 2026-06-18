@@ -232,7 +232,7 @@ static void findIL2CPP(void) {
                 else if (strcmp(n, "CheckSkillAttackCanUse") == 0 && !g_funcCheckSkillAttackCanUse) { g_funcCheckSkillAttackCanUse=funcAddr; found++; jlog(@"FOUND %s.%s params=%u addr=%p", cn?:"?",n,pc,funcAddr); }
                 else if (strcmp(n, "CanBeAttack") == 0 && !g_funcCanBeAttack) { g_funcCanBeAttack=funcAddr; found++; jlog(@"FOUND %s.%s params=%u addr=%p ★v37★", cn?:"?",n,pc,funcAddr); }
                 else if (strcmp(n, "Damage") == 0 && pc >= 10 && !g_funcDamage) { g_funcDamage=funcAddr; found++; jlog(@"FOUND %s.%s params=%u addr=%p ★v37★", cn?:"?",n,pc,funcAddr); }
-                else if (strcmp(n, "Intersects") == 0 && pc == 1 && !g_funcIntersects) { g_funcIntersects=funcAddr; found++; jlog(@"FOUND %s.%s params=%u addr=%p ★v38全屏★", cn?:"?",n,pc,funcAddr); }
+                else if (strcmp(n, "Intersects") == 0 && pc == 1 && cn && strstr(cn, "FPBounds2") != NULL && !g_funcIntersects) { g_funcIntersects=funcAddr; found++; jlog(@"FOUND %s.%s params=%u addr=%p ★v38全屏★", cn?:"?",n,pc,funcAddr); }
             }
         }
     }
