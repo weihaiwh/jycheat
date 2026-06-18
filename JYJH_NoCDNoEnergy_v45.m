@@ -104,7 +104,8 @@ static int64_t hDamage(void *f,void *atkEnt,void *atkCF,void *tgtEnt,void *tgtCF
         // v45: DISABLE Damage/DecreaseHP扩散(导致卡顿+敌人不死)
         // v44验证: Damage扩散+DecreaseHP扩散→敌人血条空但不死→切换场景卡住
         // 原因: 对非碰撞路径的敌人调用Damage/DecreaseHP会破坏帧同步
-        // 当前全屏效果: Intersects+CheckHit让碰撞通过(水平线上的敌人✅)    }
+        // 当前全屏效果: Intersects+CheckHit让碰撞通过(水平线上的敌人OK)
+    }
     return r;
 }
 static BOOL hIntersects(void *s,void *o){if(g_fullScreen)return YES;return g_oIntersects?g_oIntersects(s,o):NO;}
