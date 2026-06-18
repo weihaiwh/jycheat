@@ -94,17 +94,6 @@ static int32_t hGetSkinId(void *self) {
     if(self==g_playerActorObj && g_appliedSkinId>0) return g_appliedSkinId;
     return r;
 }
-typedef void (*UpdatePartFunc)(void*,int32_t,int32_t,int32_t); // (LobbyActorData*, skinId, weaponId, haloId)
-static void *g_fUpdatePart=NULL;
-
-// v54: Actor字段偏移
-// Actor.SkinId backing field = +0x110
-// Actor.WeaponId backing field = +0x114
-// Actor.HaloId backing field = +0x118
-// Actor inherits from SceneActorSpineAvatar -> LobbyActorSpineAvatar(大厅)
-// 在战斗中Actor有自己的实例,需要找到self(玩家)的Actor对象
-static void *g_playerActorObj=NULL; // IL2CPP Actor对象实例
-static int32_t g_appliedSkinId=0, g_appliedWeaponId=0; // 已应用的ID
 
 // HitSystem.collBound is FPBounds2 at +0x38
 // FPBounds2: Center(FPVector2,+0x10) + Extents(FPVector2,+0x20)
