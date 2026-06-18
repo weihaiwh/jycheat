@@ -1,0 +1,469 @@
+/**
+ * 剑影江湖 v39.0 - 全屏秒杀 + 玩家不死 + ImGui风格UI
+ *
+ * v38效果确认:
+ *   - Hook FPBounds2.Intersects返回true → 全屏秒杀 ✅
+ *   - 前后方向释放都可以
+ *   - 修复类名匹配: FPBounds2 vs UnityEngine.Bounds
+ *
+ * v39优化:
+ *   1. 伤害滑块范围1-5000, 默认100
+ *   2. ImGui风格深色UI (渐变背景, 圆角, 半透明, 霓虹色彩)
+ *   3. 浮球优化: 更小更精致
+ */
+
+#import <mach-o/dyld.h>
+#import <mach/mach.h>
+#import <dispatch/dispatch.h>
+#import <UIKit/UIKit.h>
+#import <QuartzCore/QuartzCore.h>
+#import <stdio.h>
+#import <string.h>
+#import <dlfcn.h>
+
+#include "dobby.h"
+
+static FILE *g_logFile = NULL;
+static void jlog(NSString *fmt, ...) {
+    va_list args; va_start(args, fmt);
+    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
+    va_end(args);
+    NSLog(@"[JYJH] %@", msg);
+    if (!g_logFile) {
+        NSString *p = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/jyjh.log"];
+        g_logFile = fopen([p UTF8String], "a");
+    }
+    if (g_logFile) { fprintf(g_logFile, "%s\n", [msg UTF8String]); fflush(g_logFile); }
+}
+
+static BOOL g_ignoreUnlock = NO;
+static BOOL g_exSkillNoCD = NO;
+static BOOL g_godMode = NO;
+static BOOL g_fullScreen = NO;
+static int g_damageLimit = 100;
+
+typedef BOOL (*BoolFunc3)(void*, int, int);
+typedef int  (*IntFunc1)(void*);
+typedef BOOL (*BoolFunc4)(void*, int, void*, void*);
+typedef BOOL (*CanBeAttackFunc)(void*);
+typedef int64_t (*DamageFunc)(void*, void*, void*, void*, void*, int32_t, int32_t, BOOL, int32_t, int32_t, void*, void*);
+typedef BOOL (*IntersectsFunc)(void *self, void *other);
+
+static void *g_funcCheckSkillUnlock = NULL; static BoolFunc3 g_origCheckSkillUnlock = NULL; static BOOL g_skillUnlockHooked = NO;
+static void *g_funcLimitDmg = NULL;         static IntFunc1 g_origLimitDmg = NULL;          static BOOL g_limitHooked = NO;
+static void *g_funcCheckSkillIsReady = NULL; static BoolFunc4 g_origCheckSkillIsReady = NULL; static BOOL g_isReadyHooked = NO;
+static void *g_funcCheckSkillAttackCanUse = NULL; static BoolFunc4 g_origCheckSkillAttackCanUse = NULL; static BOOL g_attackCanUseHooked = NO;
+static void *g_funcCanBeAttack = NULL;      static CanBeAttackFunc g_origCanBeAttack = NULL; static BOOL g_canBeAttackHooked = NO;
+static void *g_funcDamage = NULL;           static DamageFunc g_origDamage = NULL;           static BOOL g_damageHooked = NO;
+static void *g_funcIntersects = NULL;       static IntersectsFunc g_origIntersects = NULL;   static BOOL g_intersectsHooked = NO;
+
+static void *g_playerCF = NULL;
+static BOOL g_playerCFLearned = NO;
+static int g_isPlayerLogCount = 0;
+
+static BOOL isPlayerCF(void *cf) {
+    if (!cf) return NO;
+    int32_t isAI = -1;
+    memcpy(&isAI, (uint8_t*)cf + 0x44, 4);
+    return (isAI == 0);
+}
+
+static void dumpCF(void *cf, int stateType, const char *source) {
+    if (!cf || g_isPlayerLogCount >= 15) return;
+    g_isPlayerLogCount++;
+    uint8_t *p = (uint8_t*)cf;
+    int32_t isAI44=0, camp24=0;
+    memcpy(&isAI44, p+0x44, 4);
+    memcpy(&camp24, p+0x24, 4);
+    char hex[400]; int pos = 0;
+    for (int i = 0; i < 0x80; i += 16) {
+        pos += snprintf(hex+pos, sizeof(hex)-pos, "+%02x:", i);
+        for (int j = 0; j < 16; j++) pos += snprintf(hex+pos, sizeof(hex)-pos, "%02x", p[i+j]);
+        pos += snprintf(hex+pos, sizeof(hex)-pos, " ");
+    }
+    jlog(@"CFDump[%d] %s st=%d cf=%p camp=%d isAI=%d %s", g_isPlayerLogCount, source, stateType, cf, camp24, isAI44, isAI44==0 ? "Player!" : "(mob)");
+    jlog(@"  %s", hex);
+}
+
+static int g_unlockLogCount = 0;
+static BOOL hookCheckSkillUnlock(void *self, int a1, int a2) {
+    if (g_ignoreUnlock) {
+        if (g_unlockLogCount < 5) { g_unlockLogCount++; jlog(@"Unlock[%d]: st=%d", g_unlockLogCount, a2); }
+        return YES;
+    }
+    return g_origCheckSkillUnlock ? g_origCheckSkillUnlock(self, a1, a2) : YES;
+}
+
+static int g_isReadyLogCount = 0;
+static int g_godModeLogCount = 0;
+static BOOL hookCheckSkillIsReady(void *frame, int stateType, void *characterField, void *states) {
+    if (g_godMode && characterField) {
+        dumpCF(characterField, stateType, "IsReady");
+        if (isPlayerCF(characterField) && !g_playerCFLearned) {
+            g_playerCF = characterField; g_playerCFLearned = YES;
+            jlog(@"IsReady: PlayerCF=%p", characterField);
+        }
+    }
+    if (g_exSkillNoCD && stateType >= 17) {
+        if (g_isReadyLogCount < 30) { g_isReadyLogCount++; jlog(@"IsReady[%d] st=%d->YES", g_isReadyLogCount, stateType); }
+        return YES;
+    }
+    return g_origCheckSkillIsReady ? g_origCheckSkillIsReady(frame, stateType, characterField, states) : YES;
+}
+
+static int g_attackCanUseLogCount = 0;
+static BOOL hookCheckSkillAttackCanUse(void *frame, int stateType, void *characterField, void *states) {
+    if (g_godMode && characterField) {
+        dumpCF(characterField, stateType, "AttackCanUse");
+        if (isPlayerCF(characterField) && !g_playerCFLearned) {
+            g_playerCF = characterField; g_playerCFLearned = YES;
+            jlog(@"AttackCanUse: PlayerCF=%p", characterField);
+        }
+    }
+    if (g_exSkillNoCD && stateType >= 17) {
+        if (g_attackCanUseLogCount < 30) { g_attackCanUseLogCount++; jlog(@"AttackCanUse[%d] st=%d->YES", g_attackCanUseLogCount, stateType); }
+        return YES;
+    }
+    return g_origCheckSkillAttackCanUse ? g_origCheckSkillAttackCanUse(frame, stateType, characterField, states) : YES;
+}
+
+static int hookLimitDmg(void *self) { return g_damageLimit; }
+
+static int g_canBeAttackLogCount = 0;
+static BOOL hookCanBeAttack(void *cf) {
+    if (g_godMode && cf && isPlayerCF(cf)) {
+        if (g_canBeAttackLogCount < 20) { g_canBeAttackLogCount++; jlog(@"CanBeAttack[%d]: Player->NO", g_canBeAttackLogCount); }
+        return NO;
+    }
+    return g_origCanBeAttack ? g_origCanBeAttack(cf) : YES;
+}
+
+static int g_damageLogCount = 0;
+static int64_t hookDamage(void *f, void *atkEntity, void *atkCF, void *tgtEntity, void *tgtCF,
+                          int32_t hitEffectId, int32_t hitSound, BOOL isRight,
+                          int32_t skillButton, int32_t skillPart, void *hurtFlag, void *exSkills) {
+    BOOL tgtIsPlayer = (tgtCF && isPlayerCF(tgtCF));
+    BOOL atkIsPlayer = (atkCF && isPlayerCF(atkCF));
+    if (g_godMode && tgtIsPlayer) {
+        if (g_damageLogCount < 20) { g_damageLogCount++; jlog(@"Damage[%d]: tgt=Player -> 0", g_damageLogCount); }
+        return 0;
+    }
+    if (!g_origDamage) return 0;
+    int64_t result = g_origDamage(f, atkEntity, atkCF, tgtEntity, tgtCF, hitEffectId, hitSound, isRight, skillButton, skillPart, hurtFlag, exSkills);
+    if (atkIsPlayer && result > 0) {
+        if (g_damageLogCount < 20) { g_damageLogCount++; jlog(@"Damage[%d]: atk=Player dmg=%lld", g_damageLogCount, result); }
+    }
+    return result;
+}
+
+static int g_intersectsLogCount = 0;
+static BOOL hookIntersects(void *self, void *other) {
+    if (g_fullScreen) {
+        if (g_intersectsLogCount < 10) { g_intersectsLogCount++; jlog(@"Intersects[%d]: full->true", g_intersectsLogCount); }
+        return YES;
+    }
+    return g_origIntersects ? g_origIntersects(self, other) : NO;
+}
+
+// IL2CPP search
+typedef void* (*Il2CppDomainGet)(void);
+typedef void** (*Il2CppDomainGetAssemblies)(void*, size_t*);
+typedef void* (*Il2CppAssemblyGetImage)(void*);
+typedef size_t (*Il2CppImageGetClassCount)(void*);
+typedef void* (*Il2CppImageGetClass)(void*, size_t);
+typedef void* (*Il2CppClassGetMethods)(void*, void**);
+typedef const char* (*Il2CppMethodGetName)(void*);
+typedef uint32_t (*Il2CppMethodGetParamCount)(void*);
+typedef const char* (*Il2CppClassGetName)(void*);
+
+static void findIL2CPP(void) {
+    jlog(@"=== v39.0 IL2CPP Search ===");
+    void *h = dlopen(NULL, RTLD_LAZY);
+    if (!h) { jlog(@"dlopen FAIL"); return; }
+    Il2CppDomainGet domain_get = dlsym(h, "il2cpp_domain_get");
+    Il2CppDomainGetAssemblies get_assemblies = dlsym(h, "il2cpp_domain_get_assemblies");
+    Il2CppAssemblyGetImage get_image = dlsym(h, "il2cpp_assembly_get_image");
+    Il2CppImageGetClassCount class_count = dlsym(h, "il2cpp_image_get_class_count");
+    Il2CppImageGetClass get_class = dlsym(h, "il2cpp_image_get_class");
+    Il2CppClassGetMethods get_methods = dlsym(h, "il2cpp_class_get_methods");
+    Il2CppMethodGetName method_name = dlsym(h, "il2cpp_method_get_name");
+    Il2CppMethodGetParamCount param_count = dlsym(h, "il2cpp_method_get_param_count");
+    Il2CppClassGetName class_name_func = dlsym(h, "il2cpp_class_get_name");
+    if (!domain_get || !method_name) { jlog(@"IL2CPP APIs not found"); return; }
+    void *domain = domain_get(); if (!domain) return;
+    size_t assemCount = 0;
+    void **assemblies = get_assemblies(domain, &assemCount);
+    if (!assemblies) return;
+    jlog(@"assemblies=%p count=%zu", assemblies, assemCount);
+    int found = 0, totalMethods = 0;
+    for (size_t a = 0; a < assemCount; a++) {
+        void *img = get_image(assemblies[a]); if (!img) continue;
+        size_t cnt = class_count ? class_count(img) : 0;
+        for (size_t c = 0; c < cnt; c++) {
+            void *klass = get_class(img, c); if (!klass) continue;
+            const char *cn = class_name_func ? class_name_func(klass) : NULL;
+            void *iter = NULL, *m = NULL;
+            while ((m = get_methods(klass, &iter)) != NULL) {
+                totalMethods++;
+                const char *n = method_name(m); if (!n) continue;
+                uint32_t pc = param_count ? param_count(m) : 0;
+                void *funcAddr = NULL; memcpy(&funcAddr, m, sizeof(void*));
+                if (strcmp(n, "CheckSkillUnlock") == 0 && !g_funcCheckSkillUnlock) { g_funcCheckSkillUnlock=funcAddr; found++; jlog(@"FOUND %s.%s p=%u %p", cn?:"?",n,pc,funcAddr); }
+                else if (strcmp(n, "get_limitDamage") == 0 && !g_funcLimitDmg) { g_funcLimitDmg=funcAddr; found++; jlog(@"FOUND %s.%s p=%u %p", cn?:"?",n,pc,funcAddr); }
+                else if (strcmp(n, "CheckSkillIsReady") == 0 && !g_funcCheckSkillIsReady) { g_funcCheckSkillIsReady=funcAddr; found++; jlog(@"FOUND %s.%s p=%u %p", cn?:"?",n,pc,funcAddr); }
+                else if (strcmp(n, "CheckSkillAttackCanUse") == 0 && !g_funcCheckSkillAttackCanUse) { g_funcCheckSkillAttackCanUse=funcAddr; found++; jlog(@"FOUND %s.%s p=%u %p", cn?:"?",n,pc,funcAddr); }
+                else if (strcmp(n, "CanBeAttack") == 0 && !g_funcCanBeAttack) { g_funcCanBeAttack=funcAddr; found++; jlog(@"FOUND %s.%s p=%u %p", cn?:"?",n,pc,funcAddr); }
+                else if (strcmp(n, "Damage") == 0 && pc >= 10 && !g_funcDamage) { g_funcDamage=funcAddr; found++; jlog(@"FOUND %s.%s p=%u %p", cn?:"?",n,pc,funcAddr); }
+                else if (strcmp(n, "Intersects") == 0 && pc == 1 && cn && strstr(cn, "FPBounds2") != NULL && !g_funcIntersects) { g_funcIntersects=funcAddr; found++; jlog(@"FOUND %s.%s p=%u %p", cn?:"?",n,pc,funcAddr); }
+            }
+        }
+    }
+    jlog(@"Scanned %d methods, found %d targets", totalMethods, found);
+}
+
+static void hookOneFunc(void *funcAddr, void *hookFunc, void **origFunc, BOOL *hookedFlag, const char *name) {
+    if (!funcAddr) { jlog(@"%s: not found", name); return; }
+    if (*hookedFlag) { jlog(@"%s: already hooked", name); return; }
+    int ret = DobbyHook(funcAddr, hookFunc, origFunc);
+    if (ret == 0) { *hookedFlag = YES; jlog(@"%s: OK at %p orig=%p", name, funcAddr, *origFunc); }
+    else { jlog(@"%s: FAILED ret=%d", name, ret); }
+}
+
+static void applyAllHooks(void) {
+    if (!g_funcCheckSkillUnlock) findIL2CPP();
+    hookOneFunc(g_funcLimitDmg, hookLimitDmg, (void**)&g_origLimitDmg, &g_limitHooked, "limitDmg");
+    jlog(@"applyAllHooks done");
+}
+
+// ===== ImGui-style UI =====
+static UIView *g_panel = nil;
+static UIButton *g_btnIgnoreUnlock = nil;
+static UIButton *g_btnExSkillNoCD = nil;
+static UIButton *g_btnGodMode = nil;
+static UIButton *g_btnFullScreen = nil;
+static UISlider *g_slider = nil;
+static UILabel *g_sliderLabel = nil;
+static BOOL g_panelOpen = NO;
+
+// ImGui color palette
+#define IMGUI_BG         [UIColor colorWithRed:0.09 green:0.09 blue:0.12 alpha:0.96]
+#define IMGUI_TITLE_BG   [UIColor colorWithRed:0.04 green:0.04 blue:0.06 alpha:1.0]
+#define IMGUI_ACCENT     [UIColor colorWithRed:0.40 green:0.68 blue:1.00 alpha:1.0]
+#define IMGUI_GREEN      [UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:1.0]
+#define IMGUI_RED        [UIColor colorWithRed:0.78 green:0.20 blue:0.20 alpha:1.0]
+#define IMGUI_TEXT       [UIColor colorWithRed:0.90 green:0.90 blue:0.92 alpha:1.0]
+#define IMGUI_DIMTEXT    [UIColor colorWithRed:0.55 green:0.55 blue:0.60 alpha:1.0]
+#define IMGUI_BALL_BG    [UIColor colorWithRed:0.12 green:0.28 blue:0.58 alpha:0.92]
+#define IMGUI_BTN_ON     [UIColor colorWithRed:0.16 green:0.52 blue:0.28 alpha:0.95]
+#define IMGUI_BTN_OFF    [UIColor colorWithRed:0.52 green:0.14 blue:0.14 alpha:0.95]
+#define IMGUI_BORDER     [UIColor colorWithRed:0.25 green:0.25 blue:0.30 alpha:0.8]
+
+static UIButton* makeImguiBtn(CGRect frame, SEL action) {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+    b.frame = frame;
+    b.layer.cornerRadius = 4;
+    b.layer.borderWidth = 1;
+    b.layer.borderColor = IMGUI_BORDER.CGColor;
+    b.titleLabel.font = [UIFont fontWithName:@"Menlo-Bold" size:12] ?: [UIFont boldSystemFontOfSize:12];
+    b.titleLabel.textColor = IMGUI_TEXT;
+    [b addTarget:[JYJHActionHandler shared] action:action forControlEvents:UIControlEventTouchUpInside];
+    return b;
+}
+
+static void refreshButtons(void) {
+    NSArray *btns = @[g_btnIgnoreUnlock, g_btnExSkillNoCD, g_btnGodMode, g_btnFullScreen];
+    NSArray *vals = @[@(g_ignoreUnlock), @(g_exSkillNoCD), @(g_godMode), @(g_fullScreen)];
+    NSArray *onNames  = @[@"ON  \xe5\xbf\xbd\xe7\x95\xa5\xe8\xa7\xa3\xe9\x94\x81", @"ON  \xe6\x8a\x80\xe8\x83\xbd\xe6\x97\xa0CD", @"ON  \xe7\x8e\xa9\xe5\xae\xb6\xe4\xb8\x8d\xe6\xad\xbb", @"ON  \xe5\x85\xa8\xe5\xb1\x8f\xe7\xa7\x92\xe6\x9d\x80"];
+    NSArray *offNames = @[@"OFF \xe5\xbf\xbd\xe7\x95\xa5\xe8\xa7\xa3\xe9\x94\x81", @"OFF \xe6\x8a\x80\xe8\x83\xbd\xe6\x97\xa0CD", @"OFF \xe7\x8e\xa9\xe5\xae\xb6\xe4\xb8\x8d\xe6\xad\xbb", @"OFF \xe5\x85\xa8\xe5\xb1\x8f\xe7\xa7\x92\xe6\x9d\x80"];
+    for (int i = 0; i < 4; i++) {
+        UIButton *b = btns[i]; BOOL v = [vals[i] boolValue];
+        [b setTitle:v ? onNames[i] : offNames[i] forState:UIControlStateNormal];
+        b.backgroundColor = v ? IMGUI_BTN_ON : IMGUI_BTN_OFF;
+        b.layer.borderColor = v ? IMGUI_GREEN.CGColor : IMGUI_RED.CGColor;
+    }
+}
+
+static void layoutPanel(UIView *bv) {
+    if (!bv || !g_panel) return;
+    CGRect bf=bv.frame, sc=[UIScreen mainScreen].bounds;
+    CGFloat pw=240, ph=290;
+    CGFloat px=bf.origin.x-pw-6; if(px<4)px=bf.origin.x+bf.size.width+6;
+    CGFloat py=bf.origin.y+bf.size.height/2-ph/2;
+    if(py<4)py=4; if(py+ph>sc.size.height-4)py=sc.size.height-ph-4;
+    g_panel.frame=CGRectMake(px,py,pw,ph);
+}
+
+static void togglePanel(UIView *bv) {
+    g_panelOpen=!g_panelOpen; g_panel.hidden=!g_panelOpen;
+    if(g_panelOpen)layoutPanel(bv);
+}
+
+@interface JYJHActionHandler : NSObject
++ (instancetype)shared;
+- (void)onIgnoreUnlock;
+- (void)onExSkillNoCD;
+- (void)onGodMode;
+- (void)onFullScreen;
+- (void)sliderChanged:(UISlider *)slider;
+@end
+@implementation JYJHActionHandler
++ (instancetype)shared { static JYJHActionHandler *s; static dispatch_once_t o; dispatch_once(&o,^{s=[[self alloc]init];}); return s; }
+- (void)onIgnoreUnlock {
+    g_ignoreUnlock=!g_ignoreUnlock;
+    if (g_ignoreUnlock && !g_skillUnlockHooked) { findIL2CPP(); hookOneFunc(g_funcCheckSkillUnlock, hookCheckSkillUnlock, (void**)&g_origCheckSkillUnlock, &g_skillUnlockHooked, "Unlock"); }
+    refreshButtons(); jlog(@"Toggle Unlock: %d", g_ignoreUnlock);
+}
+- (void)onExSkillNoCD {
+    g_exSkillNoCD=!g_exSkillNoCD;
+    if (g_exSkillNoCD) {
+        findIL2CPP();
+        if (!g_isReadyHooked) hookOneFunc(g_funcCheckSkillIsReady, hookCheckSkillIsReady, (void**)&g_origCheckSkillIsReady, &g_isReadyHooked, "IsReady");
+        if (!g_attackCanUseHooked) hookOneFunc(g_funcCheckSkillAttackCanUse, hookCheckSkillAttackCanUse, (void**)&g_origCheckSkillAttackCanUse, &g_attackCanUseHooked, "AttackCanUse");
+    }
+    refreshButtons(); jlog(@"Toggle NoCD: %d", g_exSkillNoCD);
+}
+- (void)onGodMode {
+    g_godMode=!g_godMode;
+    if (g_godMode) {
+        findIL2CPP();
+        if (!g_attackCanUseHooked) hookOneFunc(g_funcCheckSkillAttackCanUse, hookCheckSkillAttackCanUse, (void**)&g_origCheckSkillAttackCanUse, &g_attackCanUseHooked, "AttackCanUse");
+        if (!g_isReadyHooked) hookOneFunc(g_funcCheckSkillIsReady, hookCheckSkillIsReady, (void**)&g_origCheckSkillIsReady, &g_isReadyHooked, "IsReady");
+        if (!g_canBeAttackHooked) hookOneFunc(g_funcCanBeAttack, hookCanBeAttack, (void**)&g_origCanBeAttack, &g_canBeAttackHooked, "CanBeAttack");
+        if (!g_damageHooked) hookOneFunc(g_funcDamage, hookDamage, (void**)&g_origDamage, &g_damageHooked, "Damage");
+    }
+    refreshButtons(); jlog(@"Toggle God: %d", g_godMode);
+}
+- (void)onFullScreen {
+    g_fullScreen=!g_fullScreen;
+    if (g_fullScreen) {
+        findIL2CPP();
+        if (!g_intersectsHooked) hookOneFunc(g_funcIntersects, hookIntersects, (void**)&g_origIntersects, &g_intersectsHooked, "Intersects");
+    }
+    refreshButtons(); jlog(@"Toggle FullScreen: %d", g_fullScreen);
+}
+- (void)sliderChanged:(UISlider *)s {
+    g_damageLimit=(int)s.value;
+    g_sliderLabel.text=[NSString stringWithFormat:@"\xe4\xbc\xa4\xe5\xae\xb3\xe4\xb8\x8a\xe9\x99\x90: %d",g_damageLimit];
+}
+@end
+
+// Floating ball - ImGui style
+@interface JYJHBallView : UIView { CGPoint _ts; BOOL _drag; }
+@end
+@implementation JYJHBallView
+- (instancetype)init {
+    self=[super initWithFrame:CGRectMake([UIScreen mainScreen].bounds.size.width-42,120,36,36)];
+    if(self){
+    self.backgroundColor=IMGUI_BALL_BG;
+    self.layer.cornerRadius=18;
+    self.layer.borderWidth=1.5;
+    self.layer.borderColor=IMGUI_ACCENT.CGColor;
+    self.userInteractionEnabled=YES;
+    // Inner icon
+    UILabel*l=[[UILabel alloc]initWithFrame:CGRectMake(0,0,36,36)];
+    l.text=@"\xe5\x89\x91"; l.textColor=[UIColor whiteColor];
+    l.font=[UIFont boldSystemFontOfSize:16]; l.textAlignment=NSTextAlignmentCenter;
+    [self addSubview:l];
+    // Subtle glow
+    self.layer.shadowColor=IMGUI_ACCENT.CGColor;
+    self.layer.shadowRadius=6; self.layer.shadowOpacity=0.5;
+    self.layer.shadowOffset=CGSizeMake(0,0);
+    }
+    return self;
+}
+- (BOOL)pointInside:(CGPoint)p withEvent:(UIEvent*)e{return CGRectContainsPoint(CGRectInset(self.bounds,-6,-6),p);}
+- (void)touchesBegan:(NSSet*)t withEvent:(UIEvent*)e{_ts=[[t anyObject]locationInView:self.superview];_drag=NO;}
+- (void)touchesMoved:(NSSet*)t withEvent:(UIEvent*)e{CGPoint c=[[t anyObject]locationInView:self.superview];CGFloat dx=c.x-_ts.x,dy=c.y-_ts.y;if(fabs(dx)>5||fabs(dy)>5){_drag=YES;CGRect f=self.frame;CGRect sc=[UIScreen mainScreen].bounds;f.origin.x=MAX(0,MIN(sc.size.width-f.size.width,f.origin.x+dx));f.origin.y=MAX(50,MIN(sc.size.height-f.size.height-50,f.origin.y+dy));self.frame=f;_ts=c;if(g_panelOpen)layoutPanel(self);}}
+- (void)touchesEnded:(NSSet*)t withEvent:(UIEvent*)e{if(!_drag)togglePanel(self);_drag=NO;}
+- (void)touchesCancelled:(NSSet*)t withEvent:(UIEvent*)e{_drag=NO;}
+@end
+
+static UIWindow *getKeyWindow(void) {
+    if (@available(iOS 15.0, *)) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (scene.activationState == UISceneActivationStateForegroundActive && [scene isKindOfClass:[UIWindowScene class]]) {
+                for (UIWindow *w in ((UIWindowScene *)scene).windows) { if (w.isKeyWindow && !w.isHidden) return w; }
+                for (UIWindow *w in ((UIWindowScene *)scene).windows) { if (!w.isHidden) return w; }
+            }
+        }
+    }
+    for (UIWindow *w in [UIApplication sharedApplication].windows) { if (w.isKeyWindow && !w.isHidden) return w; }
+    return nil;
+}
+
+static void setupUI(void) {
+    UIWindow *win = getKeyWindow();
+    if (!win) { dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{setupUI();}); return; }
+    JYJHBallView *ball = [[JYJHBallView alloc] init]; [win addSubview:ball];
+
+    CGFloat pw=240, ph=290;
+    g_panel=[[UIView alloc]initWithFrame:CGRectMake(0,0,pw,ph)];
+    g_panel.backgroundColor=IMGUI_BG;
+    g_panel.layer.cornerRadius=8;
+    g_panel.layer.borderWidth=1;
+    g_panel.layer.borderColor=IMGUI_BORDER.CGColor;
+    g_panel.hidden=YES;
+    g_panel.clipsToBounds=YES;
+    [win addSubview:g_panel];
+
+    // Title bar - ImGui style
+    UIView *titleBar=[[UIView alloc]initWithFrame:CGRectMake(0,0,pw,28)];
+    titleBar.backgroundColor=IMGUI_TITLE_BG;
+    titleBar.layer.cornerRadius=8;
+    // Mask bottom corners
+    CAShapeLayer *mask=[CAShapeLayer layer];
+    UIBezierPath *path=[UIBezierPath bezierPathWithRoundedRect:titleBar.bounds byRoundingCorners:UIRectCornerTopLeft|UIRectCornerTopRight cornerRadii:CGSizeMake(8,8)];
+    mask.path=path.CGPath; titleBar.layer.mask=mask;
+    [g_panel addSubview:titleBar];
+
+    UILabel *title=[[UILabel alloc]initWithFrame:CGRectMake(8,4,pw-16,20)];
+    title.text=@"  \xe5\x89\x91\xe5\xbd\xb1\xe6\xb1\x9f\xe6\xb9\x96 v39.0"; title.textColor=IMGUI_ACCENT;
+    title.font=[UIFont fontWithName:@"Menlo-Bold" size:13] ?: [UIFont boldSystemFontOfSize:13];
+    title.textAlignment=NSTextAlignmentLeft; [titleBar addSubview:title];
+
+    // Buttons - ImGui toggle style
+    CGFloat bx=10, bw=pw-20, bh=30, by0=36, bdy=34;
+    g_btnIgnoreUnlock=makeImguiBtn(CGRectMake(bx,by0,bw,bh), @selector(onIgnoreUnlock)); [g_panel addSubview:g_btnIgnoreUnlock];
+    g_btnExSkillNoCD=makeImguiBtn(CGRectMake(bx,by0+bdy,bw,bh), @selector(onExSkillNoCD)); [g_panel addSubview:g_btnExSkillNoCD];
+    g_btnGodMode=makeImguiBtn(CGRectMake(bx,by0+bdy*2,bw,bh), @selector(onGodMode)); [g_panel addSubview:g_btnGodMode];
+    g_btnFullScreen=makeImguiBtn(CGRectMake(bx,by0+bdy*3,bw,bh), @selector(onFullScreen)); [g_panel addSubview:g_btnFullScreen];
+
+    // Separator line
+    CGFloat sepY = by0 + bdy*4 - 2;
+    UIView *sep=[[UIView alloc]initWithFrame:CGRectMake(bx,sepY,bw,1)];
+    sep.backgroundColor=IMGUI_BORDER; [g_panel addSubview:sep];
+
+    // Damage slider
+    CGFloat sy = sepY + 6;
+    g_sliderLabel=[[UILabel alloc]initWithFrame:CGRectMake(bx,sy,bw,16)];
+    g_sliderLabel.text=[NSString stringWithFormat:@"\xe4\xbc\xa4\xe5\xae\xb3\xe4\xb8\x8a\xe9\x99\x90: %d", g_damageLimit];
+    g_sliderLabel.textColor=IMGUI_DIMTEXT;
+    g_sliderLabel.font=[UIFont fontWithName:@"Menlo" size:11] ?: [UIFont systemFontOfSize:11];
+    [g_panel addSubview:g_sliderLabel];
+
+    g_slider=[[UISlider alloc]initWithFrame:CGRectMake(bx,sy+18,bw,24)];
+    g_slider.minimumValue=1; g_slider.maximumValue=5000; g_slider.value=g_damageLimit;
+    // ImGui-style slider tint
+    g_slider.minimumTrackTintColor=IMGUI_ACCENT;
+    g_slider.maximumTrackTintColor=[UIColor colorWithRed:0.2 green:0.2 blue:0.25 alpha:1.0];
+    [g_slider setThumbTintColor:[UIColor whiteColor]];
+    [g_slider addTarget:[JYJHActionHandler shared] action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
+    [g_panel addSubview:g_slider];
+
+    refreshButtons();
+}
+
+__attribute__((constructor))
+static void initialize(void) {
+    static BOOL loaded = NO;
+    if (loaded) return;
+    loaded = YES;
+    jlog(@"========== JYJH v39.0 ==========");
+    jlog(@"iOS %@", [[UIDevice currentDevice] systemVersion]);
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(5.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+        jlog(@"5s delay done");
+        applyAllHooks();
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ setupUI(); });
+    });
+}
