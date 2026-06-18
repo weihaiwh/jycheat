@@ -1,22 +1,21 @@
 /**
- * 剑影江湖 v39.0 - 全屏秒杀 + 玩家不死 + ImGui风格UI
+ * 剑影江湖 v39.0 - 真全屏秒杀(Z轴也覆盖) + ImGui风格UI
  *
- * v38效果确认:
- *   - Hook FPBounds2.Intersects返回true → 全屏秒杀 ✅
- *   - 前后方向释放都可以
- *   - 修复类名匹配: FPBounds2 vs UnityEngine.Bounds
+ * v38效果: FPBounds2.Intersects→true, X/Y方向全屏 ✅
+ * v38问题: Z轴(上下/深度)仍有碰撞限制, 不在一条直线打不到
  *
- * v39优化:
- *   1. 伤害滑块范围1-5000, 默认100
- *   2. ImGui风格深色UI (渐变背景, 圆角, 半透明, 霓虹色彩)
- *   3. 浮球优化: 更小更精致
+ * v39方案: 同时Hook FPBounds2.Intersects + CheckPlayerHitCollider
+ *   - Intersects: XY平面碰撞检测→始终true
+ *   - CheckPlayerHitCollider: 接收FPBounds2, 返回Int32(命中数)
+ *     Hook后返回1表示命中→绕过Z轴检查
+ *   - 伤害滑块1-5000, 默认100
+ *   - ImGui风格深色UI
  */
 
 #import <mach-o/dyld.h>
 #import <mach/mach.h>
 #import <dispatch/dispatch.h>
 #import <UIKit/UIKit.h>
-#import <QuartzCore/QuartzCore.h>
 #import <stdio.h>
 #import <string.h>
 #import <dlfcn.h>
@@ -48,6 +47,7 @@ typedef BOOL (*BoolFunc4)(void*, int, void*, void*);
 typedef BOOL (*CanBeAttackFunc)(void*);
 typedef int64_t (*DamageFunc)(void*, void*, void*, void*, void*, int32_t, int32_t, BOOL, int32_t, int32_t, void*, void*);
 typedef BOOL (*IntersectsFunc)(void *self, void *other);
+typedef int32_t (*CheckHitFunc)(void *frame, void *collBound); // CheckPlayerHitCollider(Frame, FPBounds2)
 
 static void *g_funcCheckSkillUnlock = NULL; static BoolFunc3 g_origCheckSkillUnlock = NULL; static BOOL g_skillUnlockHooked = NO;
 static void *g_funcLimitDmg = NULL;         static IntFunc1 g_origLimitDmg = NULL;          static BOOL g_limitHooked = NO;
@@ -56,6 +56,7 @@ static void *g_funcCheckSkillAttackCanUse = NULL; static BoolFunc4 g_origCheckSk
 static void *g_funcCanBeAttack = NULL;      static CanBeAttackFunc g_origCanBeAttack = NULL; static BOOL g_canBeAttackHooked = NO;
 static void *g_funcDamage = NULL;           static DamageFunc g_origDamage = NULL;           static BOOL g_damageHooked = NO;
 static void *g_funcIntersects = NULL;       static IntersectsFunc g_origIntersects = NULL;   static BOOL g_intersectsHooked = NO;
+static void *g_funcCheckHit = NULL;         static CheckHitFunc g_origCheckHit = NULL;        static BOOL g_checkHitHooked = NO;
 
 static void *g_playerCF = NULL;
 static BOOL g_playerCFLearned = NO;
@@ -165,6 +166,18 @@ static BOOL hookIntersects(void *self, void *other) {
     return g_origIntersects ? g_origIntersects(self, other) : NO;
 }
 
+// v39: Hook CheckPlayerHitCollider - Z轴碰撞检测
+// static Int32 CheckPlayerHitCollider(Frame f, FPBounds2 collBound)
+// 返回命中玩家数, Hook后返回1表示命中→绕过Z轴深度限制
+static int g_checkHitLogCount = 0;
+static int32_t hookCheckHit(void *frame, void *collBound) {
+    if (g_fullScreen) {
+        if (g_checkHitLogCount < 10) { g_checkHitLogCount++; jlog(@"CheckHit[%d]: full->1(Zhit)", g_checkHitLogCount); }
+        return 1;
+    }
+    return g_origCheckHit ? g_origCheckHit(frame, collBound) : 0;
+}
+
 // IL2CPP search
 typedef void* (*Il2CppDomainGet)(void);
 typedef void** (*Il2CppDomainGetAssemblies)(void*, size_t*);
@@ -215,6 +228,7 @@ static void findIL2CPP(void) {
                 else if (strcmp(n, "CanBeAttack") == 0 && !g_funcCanBeAttack) { g_funcCanBeAttack=funcAddr; found++; jlog(@"FOUND %s.%s p=%u %p", cn?:"?",n,pc,funcAddr); }
                 else if (strcmp(n, "Damage") == 0 && pc >= 10 && !g_funcDamage) { g_funcDamage=funcAddr; found++; jlog(@"FOUND %s.%s p=%u %p", cn?:"?",n,pc,funcAddr); }
                 else if (strcmp(n, "Intersects") == 0 && pc == 1 && cn && strstr(cn, "FPBounds2") != NULL && !g_funcIntersects) { g_funcIntersects=funcAddr; found++; jlog(@"FOUND %s.%s p=%u %p", cn?:"?",n,pc,funcAddr); }
+                else if (strcmp(n, "CheckPlayerHitCollider") == 0 && pc == 2 && !g_funcCheckHit) { g_funcCheckHit=funcAddr; found++; jlog(@"FOUND %s.%s p=%u %p", cn?:"?",n,pc,funcAddr); }
             }
         }
     }
@@ -271,15 +285,41 @@ static UIButton* makeImguiBtn(CGRect frame, SEL action) {
 }
 
 static void refreshButtons(void) {
-    NSArray *btns = @[g_btnIgnoreUnlock, g_btnExSkillNoCD, g_btnGodMode, g_btnFullScreen];
-    NSArray *vals = @[@(g_ignoreUnlock), @(g_exSkillNoCD), @(g_godMode), @(g_fullScreen)];
-    NSArray *onNames  = @[@"ON  \xe5\xbf\xbd\xe7\x95\xa5\xe8\xa7\xa3\xe9\x94\x81", @"ON  \xe6\x8a\x80\xe8\x83\xbd\xe6\x97\xa0CD", @"ON  \xe7\x8e\xa9\xe5\xae\xb6\xe4\xb8\x8d\xe6\xad\xbb", @"ON  \xe5\x85\xa8\xe5\xb1\x8f\xe7\xa7\x92\xe6\x9d\x80"];
-    NSArray *offNames = @[@"OFF \xe5\xbf\xbd\xe7\x95\xa5\xe8\xa7\xa3\xe9\x94\x81", @"OFF \xe6\x8a\x80\xe8\x83\xbd\xe6\x97\xa0CD", @"OFF \xe7\x8e\xa9\xe5\xae\xb6\xe4\xb8\x8d\xe6\xad\xbb", @"OFF \xe5\x85\xa8\xe5\xb1\x8f\xe7\xa7\x92\xe6\x9d\x80"];
-    for (int i = 0; i < 4; i++) {
-        UIButton *b = btns[i]; BOOL v = [vals[i] boolValue];
-        [b setTitle:v ? onNames[i] : offNames[i] forState:UIControlStateNormal];
-        b.backgroundColor = v ? IMGUI_BTN_ON : IMGUI_BTN_OFF;
-        b.layer.borderColor = v ? IMGUI_GREEN.CGColor : IMGUI_RED.CGColor;
+    if (g_ignoreUnlock) {
+        [g_btnIgnoreUnlock setTitle:@"ON  \xe5\xbf\xbd\xe7\x95\xa5\xe8\xa7\xa3\xe9\x94\x81" forState:UIControlStateNormal];
+        g_btnIgnoreUnlock.backgroundColor = IMGUI_BTN_ON;
+        g_btnIgnoreUnlock.layer.borderColor = IMGUI_GREEN.CGColor;
+    } else {
+        [g_btnIgnoreUnlock setTitle:@"OFF \xe5\xbf\xbd\xe7\x95\xa5\xe8\xa7\xa3\xe9\x94\x81" forState:UIControlStateNormal];
+        g_btnIgnoreUnlock.backgroundColor = IMGUI_BTN_OFF;
+        g_btnIgnoreUnlock.layer.borderColor = IMGUI_RED.CGColor;
+    }
+    if (g_exSkillNoCD) {
+        [g_btnExSkillNoCD setTitle:@"ON  \xe6\x8a\x80\xe8\x83\xbd\xe6\x97\xa0CD" forState:UIControlStateNormal];
+        g_btnExSkillNoCD.backgroundColor = IMGUI_BTN_ON;
+        g_btnExSkillNoCD.layer.borderColor = IMGUI_GREEN.CGColor;
+    } else {
+        [g_btnExSkillNoCD setTitle:@"OFF \xe6\x8a\x80\xe8\x83\xbd\xe6\x97\xa0CD" forState:UIControlStateNormal];
+        g_btnExSkillNoCD.backgroundColor = IMGUI_BTN_OFF;
+        g_btnExSkillNoCD.layer.borderColor = IMGUI_RED.CGColor;
+    }
+    if (g_godMode) {
+        [g_btnGodMode setTitle:@"ON  \xe7\x8e\xa9\xe5\xae\xb6\xe4\xb8\x8d\xe6\xad\xbb" forState:UIControlStateNormal];
+        g_btnGodMode.backgroundColor = IMGUI_BTN_ON;
+        g_btnGodMode.layer.borderColor = IMGUI_GREEN.CGColor;
+    } else {
+        [g_btnGodMode setTitle:@"OFF \xe7\x8e\xa9\xe5\xae\xb6\xe4\xb8\x8d\xe6\xad\xbb" forState:UIControlStateNormal];
+        g_btnGodMode.backgroundColor = IMGUI_BTN_OFF;
+        g_btnGodMode.layer.borderColor = IMGUI_RED.CGColor;
+    }
+    if (g_fullScreen) {
+        [g_btnFullScreen setTitle:@"ON  \xe5\x85\xa8\xe5\xb1\x8f\xe7\xa7\x92\xe6\x9d\x80" forState:UIControlStateNormal];
+        g_btnFullScreen.backgroundColor = IMGUI_BTN_ON;
+        g_btnFullScreen.layer.borderColor = IMGUI_GREEN.CGColor;
+    } else {
+        [g_btnFullScreen setTitle:@"OFF \xe5\x85\xa8\xe5\xb1\x8f\xe7\xa7\x92\xe6\x9d\x80" forState:UIControlStateNormal];
+        g_btnFullScreen.backgroundColor = IMGUI_BTN_OFF;
+        g_btnFullScreen.layer.borderColor = IMGUI_RED.CGColor;
     }
 }
 
@@ -338,6 +378,7 @@ static void togglePanel(UIView *bv) {
     if (g_fullScreen) {
         findIL2CPP();
         if (!g_intersectsHooked) hookOneFunc(g_funcIntersects, hookIntersects, (void**)&g_origIntersects, &g_intersectsHooked, "Intersects");
+        if (!g_checkHitHooked) hookOneFunc(g_funcCheckHit, hookCheckHit, (void**)&g_origCheckHit, &g_checkHitHooked, "CheckHit(Z)");
     }
     refreshButtons(); jlog(@"Toggle FullScreen: %d", g_fullScreen);
 }
@@ -406,14 +447,9 @@ static void setupUI(void) {
     g_panel.clipsToBounds=YES;
     [win addSubview:g_panel];
 
-    // Title bar - ImGui style
+    // Title bar
     UIView *titleBar=[[UIView alloc]initWithFrame:CGRectMake(0,0,pw,28)];
     titleBar.backgroundColor=IMGUI_TITLE_BG;
-    titleBar.layer.cornerRadius=8;
-    // Mask bottom corners
-    CAShapeLayer *mask=[CAShapeLayer layer];
-    UIBezierPath *path=[UIBezierPath bezierPathWithRoundedRect:titleBar.bounds byRoundingCorners:UIRectCornerTopLeft|UIRectCornerTopRight cornerRadii:CGSizeMake(8,8)];
-    mask.path=path.CGPath; titleBar.layer.mask=mask;
     [g_panel addSubview:titleBar];
 
     UILabel *title=[[UILabel alloc]initWithFrame:CGRectMake(8,4,pw-16,20)];

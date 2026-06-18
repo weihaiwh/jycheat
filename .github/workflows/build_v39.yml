@@ -102,7 +102,7 @@ jobs:
             -framework UIKit \
             -framework CoreGraphics \
             -framework CoreFoundation \
-            -framework QuartzCore \
+            -framework CoreGraphics \
             -lSystem \
             -lobjc \
             -lc++ \
