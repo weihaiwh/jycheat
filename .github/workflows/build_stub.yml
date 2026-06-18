@@ -2,7 +2,7 @@ name: Build KSAdSDK Stub Framework
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ disabled-stub ]
     paths:
       - 'KSAdSDK_Stub.m'
       - '.github/workflows/build_stub.yml'

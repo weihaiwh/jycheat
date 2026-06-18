@@ -416,7 +416,7 @@ static void setupUI(void){
     CGFloat s2Y=sy+48;UIView *s2=[[UIView alloc]initWithFrame:CGRectMake(bx,s2Y,bw,1)];s2.backgroundColor=IMGUI_BORDER;[g_panel addSubview:s2];
     // Skin section
     CGFloat ssy=s2Y+4;
-    UILabel *secT=[[UILabel alloc]initWithFrame:CGRectMake(bx,ssy,bw,16)];secT.text=@"\xe7\x9a\xae\xe8\x82\xa4/\xe6\xad\xa6\xe5\x99\xa8" "(\xe6\x88\x98\xe6\x96\x97\xe4\xb8\xad\xe5\x86\x99Actor\xe5\xad\x97\xe6\xae\xb5)";secT.textColor=IMGUI_ACCENT;secT.font=[UIFont boldSystemFontOfSize:10];[g_panel addSubview:secT];
+    UILabel *secT=[[UILabel alloc]initWithFrame:CGRectMake(bx,ssy,bw,16)];secT.text=@"\xe7\x9a\xae\xe8\x82\xa4/\xe6\xad\xa6\xe5\x99\xa8" "(\xe6\x88\x98\xe6\x96\x97\xe4\xb8\xad\xe5\x86\x99" "Actor" "\xe5\xad\x97\xe6\xae\xb5)";secT.textColor=IMGUI_ACCENT;secT.font=[UIFont boldSystemFontOfSize:10];[g_panel addSubview:secT];
     // Skin slider
     g_skinLabel=[[UILabel alloc]initWithFrame:CGRectMake(bx,ssy+16,bw,16)];g_skinLabel.text=[NSString stringWithFormat:@"\xe7\x9a\xae\xe8\x82\xa4" "ID: %d",g_skinId];g_skinLabel.textColor=IMGUI_DIMTEXT;g_skinLabel.font=[UIFont systemFontOfSize:11];[g_panel addSubview:g_skinLabel];
     g_skinSlider=[[UISlider alloc]initWithFrame:CGRectMake(bx,ssy+32,bw,24)];g_skinSlider.minimumValue=0;g_skinSlider.maximumValue=200;g_skinSlider.value=g_skinId;[g_skinSlider addTarget:[JYJHActionHandler shared] action:@selector(skinSliderChanged:) forControlEvents:UIControlEventValueChanged];[g_panel addSubview:g_skinSlider];

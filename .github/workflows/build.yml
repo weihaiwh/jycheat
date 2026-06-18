@@ -2,7 +2,7 @@ name: Build JYJH AntiDetect Dylib (v5.0)
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ disabled-anti-detect ]
   workflow_dispatch:
 
 jobs:
