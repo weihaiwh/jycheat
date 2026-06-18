@@ -251,7 +251,6 @@ static void applyAllHooks(void) {
 }
 
 // ===== ImGui-style UI =====
-@class JYJHActionHandler;
 
 static UIView *g_panel = nil;
 static UIButton *g_btnIgnoreUnlock = nil;
@@ -274,6 +273,16 @@ static BOOL g_panelOpen = NO;
 #define IMGUI_BTN_ON     [UIColor colorWithRed:0.16 green:0.52 blue:0.28 alpha:0.95]
 #define IMGUI_BTN_OFF    [UIColor colorWithRed:0.52 green:0.14 blue:0.14 alpha:0.95]
 #define IMGUI_BORDER     [UIColor colorWithRed:0.25 green:0.25 blue:0.30 alpha:0.8]
+
+// Forward declare - move @interface before makeImguiBtn
+@interface JYJHActionHandler : NSObject
++ (instancetype)shared;
+- (void)onIgnoreUnlock;
+- (void)onExSkillNoCD;
+- (void)onGodMode;
+- (void)onFullScreen;
+- (void)sliderChanged:(UISlider *)slider;
+@end
 
 static UIButton* makeImguiBtn(CGRect frame, SEL action) {
     UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -299,11 +308,11 @@ static void refreshButtons(void) {
         g_btnIgnoreUnlock.layer.borderColor = IMGUI_RED.CGColor;
     }
     if (g_exSkillNoCD) {
-        [g_btnExSkillNoCD setTitle:@"ON  \xe6\x8a\x80\xe8\x83\xbd\xe6\x97\xa0CD" forState:UIControlStateNormal];
+        [g_btnExSkillNoCD setTitle:@"ON  \xe6\x8a\x80\xe8\x83\xbd\xe6\x97" "\xa0" "CD" forState:UIControlStateNormal];
         g_btnExSkillNoCD.backgroundColor = IMGUI_BTN_ON;
         g_btnExSkillNoCD.layer.borderColor = IMGUI_GREEN.CGColor;
     } else {
-        [g_btnExSkillNoCD setTitle:@"OFF \xe6\x8a\x80\xe8\x83\xbd\xe6\x97\xa0CD" forState:UIControlStateNormal];
+        [g_btnExSkillNoCD setTitle:@"OFF \xe6\x8a\x80\xe8\x83\xbd\xe6\x97" "\xa0" "CD" forState:UIControlStateNormal];
         g_btnExSkillNoCD.backgroundColor = IMGUI_BTN_OFF;
         g_btnExSkillNoCD.layer.borderColor = IMGUI_RED.CGColor;
     }
@@ -342,14 +351,6 @@ static void togglePanel(UIView *bv) {
     if(g_panelOpen)layoutPanel(bv);
 }
 
-@interface JYJHActionHandler : NSObject
-+ (instancetype)shared;
-- (void)onIgnoreUnlock;
-- (void)onExSkillNoCD;
-- (void)onGodMode;
-- (void)onFullScreen;
-- (void)sliderChanged:(UISlider *)slider;
-@end
 @implementation JYJHActionHandler
 + (instancetype)shared { static JYJHActionHandler *s; static dispatch_once_t o; dispatch_once(&o,^{s=[[self alloc]init];}); return s; }
 - (void)onIgnoreUnlock {
