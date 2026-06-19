@@ -13,11 +13,6 @@
  *   3. 增加指针合法性检查(非NULL且对齐到8字节)
  *   4. 如果任何一步读取失败就安全返回,不继续解引用
  */
- *      - TbRoleSkin._dataList(List<RoleSkin>) at +0x18
- *      - 遍历List读取每个RoleSkin.Id at +0x10(它是class,dump偏移=实际偏移)
- *   3. 如果找不到Tables实例,只打印日志不卡死
- *   4. 保留v55的HitSystem偏移修正(0x48/0x50)和皮肤修改修复
- */
 #import <mach-o/dyld.h>
 #import <mach/mach.h>
 #import <dispatch/dispatch.h>
