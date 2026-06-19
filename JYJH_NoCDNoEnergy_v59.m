@@ -98,7 +98,7 @@ static int64_t g_savedExtX=0, g_savedExtY=0;
 
 // v59: 大招增强 - Hook TryTriggerExSkill
 // ExSkillHelper.TryTriggerExSkill(Frame, ExSkillTriggerType, EntityRef, EntityRef, List<EntityRef>, CharacterFiled*, ExSkillsAsset, UInt64)
-typedef BOOL (*TryTriggerExSkillFunc)(void*,uint64_t,void*,void,void*,void*,void*,uint64_t);
+typedef BOOL (*TryTriggerExSkillFunc)(void*,uint64_t,void*,void*,void*,void*,void*,uint64_t);
 static void *g_fTryTriggerExSkill=NULL; static TryTriggerExSkillFunc g_oTryTriggerExSkill=NULL; static BOOL g_hTryTriggerExSkill=NO;
 static int g_triggerExSkillLC=0;
 static BOOL hTryTriggerExSkill(void *f,uint64_t triggerType,void *trigger,void *fuse,void *targets,void *cf,void *asset,uint64_t data) {
@@ -197,15 +197,20 @@ static void scanSkinIds(void) {
 
 got_tables:
     ;
+    void *tables_l=NULL; // local tables variable
+    // Re-read tables for the got_tables label
+    memcpy(&tables_l,(uint8_t*)configComp+0x28,8);
+    if(!isValidPtr(tables_l)){memcpy(&tables_l,(uint8_t*)configComp+0x20,8);}
+    if(!isValidPtr(tables_l)){jlog(@"ScanSkin: tables invalid at got_tables");return;}
     // Tables.TbRoleSkin at +0x230 (class field, dump=actual)
     void *tbRoleSkin=NULL;
-    memcpy(&tbRoleSkin,(uint8_t*)tables+0x230,8);
+    memcpy(&tbRoleSkin,(uint8_t*)tables_l+0x230,8);
     jlog(@"ScanSkin: tbRoleSkin=%p",tbRoleSkin);
     if(!isValidPtr(tbRoleSkin)){
         // dump Tables对象前几个字段
         jlog(@"ScanSkin: TbRoleSkin invalid, dumping Tables:");
         for(int i=0;i<78;i++){ // 0x230/8=56, 多扫几个
-            uint64_t v=0; memcpy(&v,(uint8_t*)tables+i*8,8);
+            uint64_t v=0; memcpy(&v,(uint8_t*)tables_l+i*8,8);
             if(isValidPtr((void*)v)){
                 jlog(@"  Tables[0x%x]=%p (valid ptr!)",i*8,(void*)v);
             }
@@ -244,7 +249,7 @@ got_tables:
 
     // 同样读取TbWeaponSkin
     void *tbWeaponSkin=NULL;
-    memcpy(&tbWeaponSkin,(uint8_t*)tables+0x248,8);
+    memcpy(&tbWeaponSkin,(uint8_t*)tables_l+0x248,8);
     if(isValidPtr(tbWeaponSkin)){
         void *wDataList=NULL;
         memcpy(&wDataList,(uint8_t*)tbWeaponSkin+0x18,8);
@@ -368,7 +373,7 @@ static void findIL2CPP(void) {
     Il2CppAssemblyGetImage get_image=dlsym(h,"il2cpp_assembly_get_image");
     Il2CppImageGetClassCount class_count=dlsym(h,"il2cpp_image_get_class_count");
     Il2CppImageGetClass get_class=dlsym(h,"il2cpp_image_get_class");
-    Il2CppCppClassGetMethods get_methods=dlsym(h,"il2cpp_class_get_methods");
+    Il2CppClassGetMethods get_methods=dlsym(h,"il2cpp_class_get_methods");
     Il2CppMethodGetName method_name=dlsym(h,"il2cpp_method_get_name");
     Il2CppMethodGetParamCount param_count=dlsym(h,"il2cpp_method_get_param_count");
     Il2CppClassGetName class_name_func=dlsym(h,"il2cpp_class_get_name");
