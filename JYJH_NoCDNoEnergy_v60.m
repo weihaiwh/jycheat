@@ -394,10 +394,6 @@ static void findIL2CPP(void) {
         }
     }
     jlog(@"Scanned %d methods, found %d targets, origDecreaseHP=%p",totalMethods,found,g_origDecreaseHP);
-    // v60: 自动Hook ConfigComponent.Awake以尽早捕获实例
-    if(g_fConfigCompAwake && !g_hConfigCompAwake) {
-        hookOneFunc(g_fConfigCompAwake,hConfigCompAwake,(void**)&g_oConfigCompAwake,&g_hConfigCompAwake,"ConfigComp.Awake");
-    }
 }
 
 static void hookOneFunc(void *fa,void *hf,void **of,BOOL *hf2,const char *name){
@@ -408,7 +404,14 @@ static void hookOneFunc(void *fa,void *hf,void **of,BOOL *hf2,const char *name){
     else jlog(@"%s: FAILED ret=%d",name,r);
 }
 
-static void applyAllHooks(void){if(!g_fLimitDmg)findIL2CPP();hookOneFunc(g_fLimitDmg,hLimitDmg,(void**)&g_oLimitDmg,&g_hLimitDmg,"limitDmg");jlog(@"applyAllHooks done");}
+// v60: 自动Hook ConfigComponent.Awake以尽早捕获实例(在findIL2CPP之后调用)
+static void hookConfigCompAwake(void) {
+    if(g_fConfigCompAwake && !g_hConfigCompAwake) {
+        hookOneFunc(g_fConfigCompAwake,hConfigCompAwake,(void**)&g_oConfigCompAwake,&g_hConfigCompAwake,"ConfigComp.Awake");
+    }
+}
+
+static void applyAllHooks(void){if(!g_fLimitDmg)findIL2CPP();hookOneFunc(g_fLimitDmg,hLimitDmg,(void**)&g_oLimitDmg,&g_hLimitDmg,"limitDmg");hookConfigCompAwake();jlog(@"applyAllHooks done");}
 
 // ===== UI =====
 static UIView *g_panel=nil, *g_titleBar=nil;
