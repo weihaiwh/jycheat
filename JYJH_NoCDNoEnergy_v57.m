@@ -119,6 +119,10 @@ static void *g_enemyCFs[MAX_ENEMIES], *g_enemyEntities[MAX_ENEMIES]; static int 
 //   → Tables.TbRoleSkin(+0x230) → TbRoleSkin._dataList(+0x18) → List<RoleSkin>
 //   → List._items(+0x10) → Array → length(+0x10), data from +0x20 (8B ptrs)
 //   → RoleSkin.Id(+0x10, class so dump=actual)
+#define MAX_SKIN_IDS 256
+static int32_t g_roleSkinIds[MAX_SKIN_IDS], g_weaponSkinIds[MAX_SKIN_IDS];
+static int g_roleSkinCount=0, g_weaponSkinCount=0;
+static BOOL g_skinIdsLoaded=NO;
 // GameEntryMain继承SingletonMono<T>, static instance at 0x0
 // GameEntryMain._config is static at 0xa8
 // 通过il2cpp_class_get_static_field_data获取GameEntryMain类的静态数据区
