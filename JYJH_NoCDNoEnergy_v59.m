@@ -136,12 +136,14 @@ static void scanSkinIds(void) {
     if(g_skinIdsLoaded) return;
     g_skinIdsLoaded=YES;
     g_roleSkinCount=0; g_weaponSkinCount=0;
+    void *configComp=NULL; // 声明在最外层, 避免作用域问题
+    void *tables_l=NULL;
 
     // 方法1: 用GameEntry.GetComponent("ConfigComponent")获取实例
     if(g_fGetComponentByTypeName) {
         typedef void* (*GetComponentByTypeNameFunc)(const char*);
         GetComponentByTypeNameFunc getComp=(GetComponentByTypeNameFunc)g_fGetComponentByTypeName;
-        void *configComp=getComp("ConfigComponent");
+        configComp=getComp("ConfigComponent");
         jlog(@"ScanSkin: GetComponent(ConfigComponent)=%p",configComp);
 
         // 如果返回的是Il2CppString*包装的调用方式不对,试直接调IL2CPP
@@ -167,15 +169,14 @@ static void scanSkinIds(void) {
 
         if(isValidPtr(configComp)) {
             // ConfigComponent.<Tables>k__BackingField at +0x28 (class field, dump=actual)
-            void *tables=NULL;
-            memcpy(&tables,(uint8_t*)configComp+0x28,8);
-            jlog(@"ScanSkin: configComp=%p tables=%p",configComp,tables);
-            if(!isValidPtr(tables)){
+            memcpy(&tables_l,(uint8_t*)configComp+0x28,8);
+            jlog(@"ScanSkin: configComp=%p tables=%p",configComp,tables_l);
+            if(!isValidPtr(tables_l)){
                 // 尝试+0x20 (MonoBehaviour本身也有字段)
-                memcpy(&tables,(uint8_t*)configComp+0x20,8);
-                jlog(@"ScanSkin: retry tables at +0x20: %p",tables);
+                memcpy(&tables_l,(uint8_t*)configComp+0x20,8);
+                jlog(@"ScanSkin: retry tables at +0x20: %p",tables_l);
             }
-            if(!isValidPtr(tables)){
+            if(!isValidPtr(tables_l)){
                 // dump整个ConfigComponent对象前0x40字节
                 jlog(@"ScanSkin: tables invalid, dumping ConfigComponent:");
                 for(int i=0;i<8;i++){
@@ -183,25 +184,15 @@ static void scanSkinIds(void) {
                     jlog(@"  CC[%d*8]=0x%llx",i,v);
                 }
             }
-            if(isValidPtr(tables)) {
-                goto got_tables;
-            }
         }
     }
 
-    // 方法2: 如果GetComponent失败, 遍历s_GameFrameworkComponents链表
-    // s_GameFrameworkComponents是静态LinkedList<GameFrameworkComponent> at BaseComponent+0x0
-    // 但这太复杂,暂不实现
-    jlog(@"ScanSkin: all methods failed, cannot find Tables");
-    return;
+    if(!isValidPtr(tables_l)) {
+        // 方法2: 如果GetComponent失败, 遍历s_GameFrameworkComponents链表
+        jlog(@"ScanSkin: all methods failed, cannot find Tables");
+        return;
+    }
 
-got_tables:
-    ;
-    void *tables_l=NULL; // local tables variable
-    // Re-read tables for the got_tables label
-    memcpy(&tables_l,(uint8_t*)configComp+0x28,8);
-    if(!isValidPtr(tables_l)){memcpy(&tables_l,(uint8_t*)configComp+0x20,8);}
-    if(!isValidPtr(tables_l)){jlog(@"ScanSkin: tables invalid at got_tables");return;}
     // Tables.TbRoleSkin at +0x230 (class field, dump=actual)
     void *tbRoleSkin=NULL;
     memcpy(&tbRoleSkin,(uint8_t*)tables_l+0x230,8);
