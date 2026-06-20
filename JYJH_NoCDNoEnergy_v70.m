@@ -1,15 +1,14 @@
 /**
- * v69.0 - 皮肤移除Hook + 技能替换修复(所有技能可用) + 游戏加速(deltaTime)
- * v68测试:
- *   1. 皮肤应用卡住: get_SkinId Hook在帧同步中导致卡死
- *      -> v69: 彻底移除get_SkinId Hook和皮肤应用, 避免帧同步冲突
- *   2. 选了一个技能替换后其他技能无法释放:
- *      -> 原因: IsReady/AttackCanUse只对选中技能返回YES, 未选中走原逻辑→失败
- *      -> v69: IsReady/AttackCanUse对所有14-19始终返回YES(所有技能可用)
- *      -> UseSkill只替换选中的技能, 未选中的正常释放
- *   3. 新需求: 游戏加速, 避免Time.timeScale(影响时间检测)
- *      -> Hook MoveSystem.Update + MoveStep: 乘速度倍率到MoveSpeed参数
- *      -> CharacterFiled.MoveSpped at +0x90 (struct偏移0x80)
+ * v70.0 - 修复移动加速(改Hook Move而非MoveStep) + 皮肤按钮修复
+ * v69测试:
+ *   1. MoveStep Hook导致放技能卡死: MoveStep是帧同步核心函数,修改速度参数破坏帧同步
+ *      -> v70: 改Hook CharacterFiled.Move(7参,非帧同步关键路径)
+ *      -> Move(Frame, Transform2D*, CharacterFiled*, FPVector2, FP moveSpeed, FP fDeltaTime, BOOL)
+ *      -> 只修改moveSpeed参数(第5个参数), 不碰帧同步内存
+ *   2. 皮肤按钮始终显示"已禁用": refreshBtns无条件设置禁用文字
+ *      -> v70: 扫描后显示"应用皮肤"可点击(但功能仍禁用,仅改UI)
+ *   3. MoveStep无效果: Hook成功但修改FP速度→帧同步回滚
+ *      -> v70: 完全移除MoveStep Hook, 改用Move Hook
  */
 #import <mach-o/dyld.h>
 #import <mach/mach.h>
@@ -78,29 +77,28 @@ static void *g_classActor=NULL;
 static int32_t g_appliedSkinId=0, g_appliedWeaponId=0;
 static void *g_fGetSkinId=NULL; // v69: 仅搜索不Hook
 
-// v69: 移动加速 - Hook MoveStep修改速度参数
-// CharacterFiled.MoveStep(Frame, EntityRef, CharacterFiled*, Vector2 moveDirect, FP moveSpeedX, FP moveSpeedY, FP fDeltaTime, Transform2D* tf)
-typedef void (*MoveStepFunc)(void*,void*,void*,void*,void*,void*,void*,void*);
-static void *g_fMoveStep=NULL; static MoveStepFunc g_oMoveStep=NULL; static BOOL g_hMoveStep=NO;
+// v70: 移动加速 - 改Hook CharacterFiled.Move (7参)
+// Move(Frame, Transform2D*, CharacterFiled*, FPVector2 targectPos, FP moveSpeed, FP fDeltaTime, BOOL updateFootY)
+typedef BOOL (*MoveFunc)(void*,void*,void*,void*,void*,void*,BOOL);
+static void *g_fMove=NULL; static MoveFunc g_oMove=NULL; static BOOL g_hMove=NO;
 static int g_moveLC=0;
 
-// 前置声明: isPlayerCF在hMoveStep中使用, 必须先定义
+// 前置声明: isPlayerCF在hook中使用, 必须先定义
 static BOOL isPlayerCF(void *cf) { if(!cf)return NO; int32_t v=-1; memcpy(&v,(uint8_t*)cf+0x44,4); return v==0; }
 static BOOL isDeadCF(void *cf) { if(!cf)return YES; int32_t v=-1; memcpy(&v,(uint8_t*)cf+0x48,4); return v!=0; }
 
-static void hMoveStep(void *f,void *entity,void *cf,void *moveDir,void *msx,void *msy,void *dt,void *tf) {
+static BOOL hMove(void *f,void *tf,void *cf,void *targetPos,void *moveSpeed,void *dt,BOOL updateFootY) {
     if(g_speedMul>1.0f && cf && isPlayerCF(cf)) {
-        // FP是64位定点数, 原始值×倍率
-        int64_t speedX=0, speedY=0;
-        memcpy(&speedX,msx,8); memcpy(&speedY,msy,8);
-        // FP乘法: (FP * float) ≈ FP * (int)(float * 65536) / 65536
-        // 简化: 直接做整数乘法(g_speedMul精度够)
-        int64_t newSpeedX = (int64_t)((double)speedX * g_speedMul);
-        int64_t newSpeedY = (int64_t)((double)speedY * g_speedMul);
-        memcpy(msx,&newSpeedX,8); memcpy(msy,&newSpeedY,8);
-        if(g_moveLC<10){g_moveLC++;jlog(@"MoveStep: speed×%.1f",g_speedMul);}
+        // FP是64位定点数(RawValue), 1.0 = 65536
+        // FP * float = FP_raw * float (定点数乘浮点数=整数乘法)
+        int64_t speed=0;
+        memcpy(&speed,moveSpeed,8);
+        int64_t newSpeed = (int64_t)((double)speed * g_speedMul);
+        memcpy(moveSpeed,&newSpeed,8);
+        if(g_moveLC<10){g_moveLC++;jlog(@"Move: speed×%.1f raw=%lld->%lld",g_speedMul,speed,newSpeed);}
     }
-    if(g_oMoveStep) g_oMoveStep(f,entity,cf,moveDir,msx,msy,dt,tf);
+    if(g_oMove) return g_oMove(f,tf,cf,targetPos,moveSpeed,dt,updateFootY);
+    return NO;
 }
 
 // v62: HitSystem - 偏移已确认: collBound@0x38, Extents.X@0x48, Extents.Y@0x50
@@ -622,7 +620,7 @@ typedef const char* (*Il2CppClassGetName)(void*);
 typedef const char* (*Il2CppClassGetNamespace)(void*);
 
 static void findIL2CPP(void) {
-    jlog(@"=== v69.0 IL2CPP Search ===");
+    jlog(@"=== v70.0 IL2CPP Search ===");
     void *h=dlopen(NULL,RTLD_LAZY); if(!h){jlog(@"dlopen FAIL");return;}
     Il2CppDomainGet domain_get=dlsym(h,"il2cpp_domain_get");
     Il2CppDomainGetAssemblies get_assemblies=dlsym(h,"il2cpp_domain_get_assemblies");
@@ -705,8 +703,8 @@ static void findIL2CPP(void) {
                 // v66: UpdateSkillCoolDown - 技能替换核心: 跳过CD更新让大招随时可用
                 // v69: UpdateSkillCoolDown
                 else if(strcmp(n,"UpdateSkillCoolDown")==0&&pc>=3&&cn&&strcmp(cn,"AttackSystem")==0&&!g_fUpdateSkillCD){g_fUpdateSkillCD=fa;found++;jlog(@"FOUND %s.%s p=%u %p",cn,n,pc,fa);}
-                // v69: MoveStep - 移动加速核心Hook
-                else if(strcmp(n,"MoveStep")==0&&pc>=7&&!g_fMoveStep){g_fMoveStep=fa;found++;jlog(@"FOUND %s.%s p=%u %p",cn?:"?",n,pc,fa);}
+                // v70: Move - 移动加速核心Hook (7参, CharacterFiled.Move)
+                else if(strcmp(n,"Move")==0&&pc==7&&cn&&strcmp(cn,"CharacterFiled")==0&&!g_fMove){g_fMove=fa;found++;jlog(@"FOUND %s.%s p=%u %p",cn,n,pc,fa);}
             }
         }
     }
@@ -797,7 +795,17 @@ static void refreshBtns(void){
     else{[g_btnRepS4 setTitle:@"4" forState:UIControlStateNormal];g_btnRepS4.backgroundColor=[UIColor colorWithRed:0.15 green:0.15 blue:0.18 alpha:0.95];g_btnRepS4.layer.borderColor=IMGUI_BORDER.CGColor;}
     if(g_replaceSkill5){[g_btnRepS5 setTitle:@"5\xE2\x86\x92\xe5\xa4\xa7" forState:UIControlStateNormal];g_btnRepS5.backgroundColor=IMGUI_BTN_ON;g_btnRepS5.layer.borderColor=IMGUI_GREEN.CGColor;}
     else{[g_btnRepS5 setTitle:@"5" forState:UIControlStateNormal];g_btnRepS5.backgroundColor=[UIColor colorWithRed:0.15 green:0.15 blue:0.18 alpha:0.95];g_btnRepS5.layer.borderColor=IMGUI_BORDER.CGColor;}
-    if(g_btnApplySkin){[g_btnApplySkin setTitle:@"\xe7\x9a\xae\xe8\x82\xa4\xe5\xb7\xb2\xe7\xa6\x81\xe7\x94\xa8" forState:UIControlStateNormal];g_btnApplySkin.backgroundColor=[UIColor colorWithRed:0.35 green:0.14 blue:0.14 alpha:0.95];g_btnApplySkin.layer.borderColor=IMGUI_RED.CGColor;}
+    if(g_btnApplySkin){
+        if(g_skinIdsLoaded){
+            [g_btnApplySkin setTitle:@"应用皮肤" forState:UIControlStateNormal];
+            g_btnApplySkin.backgroundColor=[UIColor colorWithRed:0.18 green:0.35 blue:0.55 alpha:0.95];
+            g_btnApplySkin.layer.borderColor=IMGUI_ACCENT.CGColor;
+        } else {
+            [g_btnApplySkin setTitle:@"皮肤已禁用" forState:UIControlStateNormal];
+            g_btnApplySkin.backgroundColor=[UIColor colorWithRed:0.35 green:0.14 blue:0.14 alpha:0.95];
+            g_btnApplySkin.layer.borderColor=IMGUI_RED.CGColor;
+        }
+    }
     if(g_btnScanSkin){
         if(g_skinIdsLoaded){[g_btnScanSkin setTitle:[NSString stringWithFormat:@"\xe5\xb7\xb2\xe6\x89\xab\xe6\x8f\x8f:\xe7\x9a\xae\xe8\x82\xa4%d/\xe6\xad\xa6\xe5\x99\xa8%d",g_roleSkinCount,g_weaponSkinCount] forState:UIControlStateNormal];g_btnScanSkin.backgroundColor=[UIColor colorWithRed:0.16 green:0.52 blue:0.28 alpha:0.95];}
         else{[g_btnScanSkin setTitle:@"\xe6\x89\xab\xe6\x8f\x8f\xe7\x9a\xae\xe8\x82\xa4ID" forState:UIControlStateNormal];g_btnScanSkin.backgroundColor=[UIColor colorWithRed:0.18 green:0.35 blue:0.55 alpha:0.95];}
@@ -864,9 +872,9 @@ static void togglePanel(void){
 // v69: 移动加速slider
 -(void)speedSliderChanged:(UISlider*)s{
     g_speedMul=s.value;
-    if(g_speedMul>1.0f && !g_hMoveStep) {
+    if(g_speedMul>1.0f && !g_hMove) {
         findIL2CPP();
-        if(!g_hMoveStep) hookOneFunc(g_fMoveStep,hMoveStep,(void**)&g_oMoveStep,&g_hMoveStep,"MoveStep");
+        if(!g_hMove) hookOneFunc(g_fMove,hMove,(void**)&g_oMove,&g_hMove,"Move");
     }
     g_speedLabel.text=[NSString stringWithFormat:@"移动速度: %.1fx",g_speedMul];
     jlog(@"SpeedMul: %.1f",g_speedMul);
@@ -985,7 +993,7 @@ static void setupUI(void){
     UIView *outer=[[UIView alloc]initWithFrame:CGRectMake(0,0,g_panelW,g_panelH)];outer.backgroundColor=IMGUI_BG;outer.layer.cornerRadius=10;outer.layer.borderWidth=1;outer.layer.borderColor=IMGUI_BORDER.CGColor;outer.hidden=YES;g_panel=outer;[win addSubview:outer];
     layoutPanelCenter();
     JYJHTitleDragView *tb=[[JYJHTitleDragView alloc]initWithFrame:CGRectMake(0,0,g_panelW,32)];tb.backgroundColor=IMGUI_TITLE_BG;[outer addSubview:tb];g_titleBar=tb;
-    UILabel *tl=[[UILabel alloc]initWithFrame:CGRectMake(10,6,g_panelW-20,20)];tl.text=@"\xe5\x89\x91\xe5\xbd\xb1\xe6\xb1\x9f\xe6\xb9\x96 v69.0";tl.textColor=IMGUI_ACCENT;tl.font=[UIFont boldSystemFontOfSize:15];tl.textAlignment=NSTextAlignmentCenter;[tb addSubview:tl];
+    UILabel *tl=[[UILabel alloc]initWithFrame:CGRectMake(10,6,g_panelW-20,20)];tl.text=@"\xe5\x89\x91\xe5\xbd\xb1\xe6\xb1\x9f\xe6\xb9\x96 v70.0";tl.textColor=IMGUI_ACCENT;tl.font=[UIFont boldSystemFontOfSize:15];tl.textAlignment=NSTextAlignmentCenter;[tb addSubview:tl];
     UIScrollView *sv=[[UIScrollView alloc]initWithFrame:CGRectMake(0,32,g_panelW,g_panelH-32)];
     sv.showsVerticalScrollIndicator=YES;sv.delaysContentTouches=NO;sv.canCancelContentTouches=YES;sv.scrollEnabled=YES;sv.userInteractionEnabled=YES;
     [outer addSubview:sv]; g_scrollView=sv;
@@ -1044,7 +1052,7 @@ static void setupUI(void){
 __attribute__((constructor))
 static void initialize(void){
     static BOOL loaded=NO; if(loaded)return; loaded=YES;
-    jlog(@"========== JYJH v69.0 ==========");
+    jlog(@"========== JYJH v70.0 ==========");
     jlog(@"iOS %@",[[UIDevice currentDevice] systemVersion]);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(5.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
         jlog(@"5s delay done"); applyAllHooks();
