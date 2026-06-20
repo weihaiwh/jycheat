@@ -736,10 +736,8 @@ static UIView *g_panel=nil, *g_titleBar=nil;
 static UIScrollView *g_scrollView=nil;
 static UIButton *g_btnIgnoreUnlock=nil,*g_btnExSkillNoCD=nil,*g_btnGodMode=nil,*g_btnFullScreen=nil,*g_btnSkillReplace=nil,*g_btnApplySkin=nil,*g_btnScanSkin=nil;
 static UIButton *g_btnRepS1=nil,*g_btnRepS2=nil,*g_btnRepS3=nil,*g_btnRepS4=nil,*g_btnRepS5=nil;
-static UISlider *g_slider=nil,*g_skinSlider=nil,*g_weaponSlider=nil,*g_speedSlider=nil; // v69: speed slider
-static UILabel *g_sliderLabel=nil,*g_skinLabel=nil,*g_weaponLabel=nil,*g_speedLabel=nil; // v69
-static UISlider *g_slider=nil,*g_skinSlider=nil,*g_weaponSlider=nil;
-static UILabel *g_sliderLabel=nil,*g_skinLabel=nil,*g_weaponLabel=nil;
+static UISlider *g_slider=nil,*g_skinSlider=nil,*g_weaponSlider=nil,*g_speedSlider=nil;
+static UILabel *g_sliderLabel=nil,*g_skinLabel=nil,*g_weaponLabel=nil,*g_speedLabel=nil;
 static BOOL g_panelOpen=NO;
 static CGFloat g_panelW=360, g_panelH=600;
 static UIView *g_resizeHandle=nil, *g_resizeHandleTop=nil;
