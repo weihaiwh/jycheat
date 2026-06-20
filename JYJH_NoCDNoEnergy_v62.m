@@ -101,24 +101,8 @@ static void hUpdatePlayerCD(void *f,void *entRef,void *cf,void *pi) {
         g_updateCDLC++;
         jlog(@"UpdatePlayerCD[%d] called",g_updateCDLC);
     }
-    // 先调原始方法让它正常走CD逻辑
     if(g_oUpdatePlayerCD) g_oUpdatePlayerCD(f,entRef,cf,pi);
-    // 然后检查CharacterFiled的ExSkillData, 把大招CD清零
-    if(g_exSkillLocalCD && cf) {
-        // ExSkillDatasPtr at cf+0x28 (dump值, struct无0x10 header减去)
-        // 但CF是struct, ExSkillDatasPtr的dump偏移: 0x28 - 0x10 = 0x18
-        // 用QListPtr读法:
-        void *exSkillDatasPtr=NULL;
-        // CF是struct, 偏移要减0x10
-        memcpy(&exSkillDatasPtr,(uint8_t*)cf+0x18,8); // ExSkillDatasPtr
-        if(isValidPtr(exSkillDatasPtr)) {
-            // QList<ExSkillData>: 跳过8字节vtable, 接着是Count, 然后是数据
-            // 但这是QList不是List, 结构不同
-            // 简单方案: 直接memset ExSkillData的LastTriggerTime为0
-            // QList内部是连续内存, 偏移取决于实现
-            // v62: 先不深入, 只Hook诊断, 确认UpdatePlayerCD是否被调用
-        }
-    }
+    // v62: 先只Hook诊断, 确认UpdatePlayerCD是否被调用, 不深入ExSkillData
 }
 
 static void *g_playerCF=NULL, *g_playerEntity=NULL; static BOOL g_playerCFLearned=NO;
