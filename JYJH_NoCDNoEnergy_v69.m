@@ -76,6 +76,7 @@ static void *g_classActor=NULL;
 // v69: 移除皮肤Hook(get_SkinId Hook导致帧同步卡死)
 // 皮肤功能暂时禁用, 保留扫描功能供查看
 static int32_t g_appliedSkinId=0, g_appliedWeaponId=0;
+static void *g_fGetSkinId=NULL; // v69: 仅搜索不Hook
 
 // v69: 移动加速 - Hook MoveStep修改速度参数
 // CharacterFiled.MoveStep(Frame, EntityRef, CharacterFiled*, Vector2 moveDirect, FP moveSpeedX, FP moveSpeedY, FP fDeltaTime, Transform2D* tf)
@@ -862,7 +863,7 @@ static void togglePanel(void){
 // v69: 移动加速slider
 -(void)speedSliderChanged:(UISlider*)s{
     g_speedMul=s.value;
-    if(g_speedMul>1.0f && !g_hMoveSkillCD) {
+    if(g_speedMul>1.0f && !g_hMoveStep) {
         findIL2CPP();
         if(!g_hMoveStep) hookOneFunc(g_fMoveStep,hMoveStep,(void**)&g_oMoveStep,&g_hMoveStep,"MoveStep");
     }
