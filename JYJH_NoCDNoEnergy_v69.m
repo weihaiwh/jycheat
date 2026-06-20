@@ -83,6 +83,11 @@ static void *g_fGetSkinId=NULL; // v69: 仅搜索不Hook
 typedef void (*MoveStepFunc)(void*,void*,void*,void*,void*,void*,void*,void*);
 static void *g_fMoveStep=NULL; static MoveStepFunc g_oMoveStep=NULL; static BOOL g_hMoveStep=NO;
 static int g_moveLC=0;
+
+// 前置声明: isPlayerCF在hMoveStep中使用, 必须先定义
+static BOOL isPlayerCF(void *cf) { if(!cf)return NO; int32_t v=-1; memcpy(&v,(uint8_t*)cf+0x44,4); return v==0; }
+static BOOL isDeadCF(void *cf) { if(!cf)return YES; int32_t v=-1; memcpy(&v,(uint8_t*)cf+0x48,4); return v!=0; }
+
 static void hMoveStep(void *f,void *entity,void *cf,void *moveDir,void *msx,void *msy,void *dt,void *tf) {
     if(g_speedMul>1.0f && cf && isPlayerCF(cf)) {
         // FP是64位定点数, 原始值×倍率
@@ -471,8 +476,6 @@ static void scanSkinIds(void) {
     for(int i=0;i<g_weaponSkinCount&&i<20;i++) jlog(@"  WeaponSkin[%d]=%d",i,g_weaponSkinIds[i]);
 }
 
-static BOOL isPlayerCF(void *cf) { if(!cf)return NO; int32_t v=-1; memcpy(&v,(uint8_t*)cf+0x44,4); return v==0; }
-static BOOL isDeadCF(void *cf) { if(!cf)return YES; int32_t v=-1; memcpy(&v,(uint8_t*)cf+0x48,4); return v!=0; }
 static void trackEnemy(void *cf, void *ent) {
     if(!cf||!ent||isPlayerCF(cf))return;
     for(int i=0;i<g_enemyCount;i++) if(g_enemyCFs[i]==cf){g_enemyEntities[i]=ent;return;}
@@ -514,7 +517,7 @@ static int64_t hDamage(void *f,void *atkEnt,void *atkCF,void *tgtEnt,void *tgtCF
     if(g_godMode&&tgtP){if(g_dmgLC<20){g_dmgLC++;jlog(@"Dmg:Player->0");}return 0;}
     // v65: skillButton不是枚举(14-19), 是内部编号, 不替换
     // 只记录sBtn用于诊断
-    if(g_skillReplace&&atkP){if(g_dmgLC<30){g_dmgLC++;jlog(@"Dmg[%d]=%lld sBtn=%d enemies=%d",g_dmgLC,0,sBtn,g_enemyCount);}}
+    if(g_skillReplace&&atkP){if(g_dmgLC<30){g_dmgLC++;jlog(@"Dmg[%d]=%d sBtn=%d enemies=%d",g_dmgLC,0,sBtn,g_enemyCount);}}
     if(!g_oDamage)return 0;
     int64_t r=g_oDamage(f,atkEnt,atkCF,tgtEnt,tgtCF,hitEid,hitSnd,isR,sBtn,sPart,hurtF,exS);
     if(atkP&&r>0){if(g_dmgLC<20){g_dmgLC++;jlog(@"Dmg[%d]=%lld enemies=%d sBtn=%d",g_dmgLC,r,g_enemyCount,sBtn);}}
