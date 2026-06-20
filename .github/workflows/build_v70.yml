@@ -92,23 +92,8 @@ jobs:
 
       - name: Release
         uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: v70.0
           files: output/*
-          body: |
-            ## v70.0 - 移动加速修复 + 皮肤按钮修复
-
-            ### 1. 移动加速修复
-            - v69 MoveStep Hook导致放技能卡死(帧同步核心函数)
-            - v70 改Hook CharacterFiled.Move(7参,非帧同步关键路径)
-            - 只修改moveSpeed参数, 不碰帧同步内存
-
-            ### 2. 皮肤按钮修复
-            - 扫描后按钮显示"应用皮肤"(功能仍禁用)
-            - 未扫描时显示"皮肤已禁用"
-
-            ### 3. 技能替换(继承v69)
-            - IsReady/AttackCanUse对所有14-19返回YES
-            - UseSkill仅替换选中的技能
-          env:
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
