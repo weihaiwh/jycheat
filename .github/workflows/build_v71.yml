@@ -1,12 +1,12 @@
-name: Build JYJH v70.0 Dylib
+name: Build JYJH v71.0 Dylib
 
 on:
   push:
     branches: [ main, master ]
     paths:
-      - 'JYJH_NoCDNoEnergy_v70.m'
+      - 'JYJH_NoCDNoEnergy_v71.m'
       - 'dobby.h'
-      - '.github/workflows/build_v70.yml'
+      - '.github/workflows/build_v71.yml'
   workflow_dispatch:
 
 jobs:
@@ -58,22 +58,22 @@ jobs:
           ninja -j$(nproc)
           echo "DOBBY_LIB=$(find /tmp/dobby/build -name 'libdobby.a' | head -1)" >> $GITHUB_ENV
 
-      - name: Build JYJH v70.0 dylib
+      - name: Build JYJH v71.0 dylib
         run: |
           TOOLCHAIN=/tmp/cctools/usage_examples/ios_toolchain/target
           export PATH="$TOOLCHAIN/bin:$PATH"
           SDK="$TOOLCHAIN/SDK/iPhoneOS15.6.sdk"
           DOBBY_LIB="${DOBBY_LIB:-/tmp/dobby/build/libdobby.a}"
           which arm-apple-darwin11-clang || { echo "ERROR: clang not found!"; exit 1; }
-          ls -la JYJH_NoCDNoEnergy_v70.m dobby.h "$DOBBY_LIB"
+          ls -la JYJH_NoCDNoEnergy_v71.m dobby.h "$DOBBY_LIB"
           arm-apple-darwin11-clang -arch arm64 -miphoneos-version-min=15.0 -isysroot "$SDK" \
             -fobjc-arc -Wno-deprecated-declarations -Wno-unguarded-availability -I. \
-            -c JYJH_NoCDNoEnergy_v70.m -o JYJH_v70.o
+            -c JYJH_NoCDNoEnergy_v71.m -o JYJH_v71.o
           arm-apple-darwin11-ld -arch arm64 -iphoneos_version_min 15.0 -syslibroot "$SDK" \
             -dynamic -dylib -framework Foundation -framework UIKit -framework CoreGraphics \
             -framework CoreFoundation -framework QuartzCore -lSystem -lobjc -lc++ \
             -objc_abi_version 2 -install_name @executable_path/JYJH_NoCDNoEnergy.dylib \
-            -o JYJH_NoCDNoEnergy.dylib JYJH_v70.o "$DOBBY_LIB"
+            -o JYJH_NoCDNoEnergy.dylib JYJH_v71.o "$DOBBY_LIB"
           file JYJH_NoCDNoEnergy.dylib && ls -lh JYJH_NoCDNoEnergy.dylib
 
       - name: Sign and package
@@ -87,7 +87,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JYJH-v70.0-dylib
+          name: JYJH-v71.0-dylib
           path: output/
 
       - name: Release
@@ -95,5 +95,5 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: v70.0
+          tag_name: v71.0
           files: output/*
