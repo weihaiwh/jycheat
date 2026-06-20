@@ -56,6 +56,9 @@ static void *g_fIntersects=NULL; static IntersectsFunc g_oIntersects=NULL; stati
 static void *g_fCheckHit=NULL; static CheckHitFunc g_oCheckHit=NULL; static BOOL g_hCheckHit=NO;
 // v65: UseSkill Hook (技能替换核心)
 static void *g_fUseSkill=NULL; static UseSkillFunc g_oUseSkill=NULL; static BOOL g_hUseSkill=NO;
+// v65: HandleSkillRange Hook (保留, 用于诊断)
+typedef void (*HandleSkillRangeFunc)(void*,void*,int32_t,void*);
+static void *g_fHandleSkillRange=NULL; static HandleSkillRangeFunc g_oHandleSkillRange=NULL; static BOOL g_hHandleSkillRange=NO;
 
 typedef void (*HitSystemUpdateFunc)(void*,void*);
 static void *g_fHitSystemUpdate=NULL; static HitSystemUpdateFunc g_oHitSystemUpdate=NULL; static BOOL g_hHitSystemUpdate=NO;
@@ -429,11 +432,9 @@ static int64_t hDamage(void *f,void *atkEnt,void *atkCF,void *tgtEnt,void *tgtCF
     if(atkP&&atkEnt)g_playerEntity=atkEnt;
     if(tgtCF&&!tgtP&&tgtEnt)trackEnemy(tgtCF,tgtEnt);
     if(g_godMode&&tgtP){if(g_dmgLC<20){g_dmgLC++;jlog(@"Dmg:Player->0");}return 0;}
-    // v64: 技能替换 - 将skillButton 14-18替换为19(大招)
-    if(g_skillReplace&&atkP&&sBtn>=14&&sBtn<=18){
-        static int srLC=0; if(srLC<10){srLC++;jlog(@"SkillReplace: Dmg sBtn %d->19",sBtn);}
-        sBtn=19;
-    }
+    // v65: skillButton不是枚举(14-19), 是内部编号, 不替换
+    // 只记录sBtn用于诊断
+    if(g_skillReplace&&atkP){if(g_dmgLC<30){g_dmgLC++;jlog(@"Dmg[%d]=%lld sBtn=%d enemies=%d",g_dmgLC,0,sBtn,g_enemyCount);}}
     if(!g_oDamage)return 0;
     int64_t r=g_oDamage(f,atkEnt,atkCF,tgtEnt,tgtCF,hitEid,hitSnd,isR,sBtn,sPart,hurtF,exS);
     if(atkP&&r>0){if(g_dmgLC<20){g_dmgLC++;jlog(@"Dmg[%d]=%lld enemies=%d sBtn=%d",g_dmgLC,r,g_enemyCount,sBtn);}}
@@ -586,8 +587,8 @@ static void findIL2CPP(void) {
                 else if(strcmp(n,"get_SkinId")==0&&pc==0&&cn&&strcmp(cn,"Actor")==0&&!g_fGetSkinId){g_fGetSkinId=fa;found++;jlog(@"FOUND %s.%s p=%u %p",cn?:"?",n,pc,fa);}
                 // v65: HandleSkillRange - 放宽搜索条件(pc>=3)
                 else if(strcmp(n,"HandleSkillRange")==0&&pc>=3&&!g_fHandleSkillRange){g_fHandleSkillRange=fa;found++;jlog(@"FOUND %s.%s p=%u %p",cn?:"?",n,pc,fa);}
-                // v65: UseSkill - 技能替换核心Hook(8参数, CharacterStateType枚举)
-                else if(strcmp(n,"UseSkill")==0&&pc>=7&&!g_fUseSkill){g_fUseSkill=fa;found++;jlog(@"FOUND %s.%s p=%u %p",cn?:"?",n,pc,fa);}
+                // v65: UseSkill - 技能替换核心Hook(8参数静态方法, 在AttackSystem类上)
+                else if(strcmp(n,"UseSkill")==0&&pc>=7&&cn&&strcmp(cn,"AttackSystem")==0&&!g_fUseSkill){g_fUseSkill=fa;found++;jlog(@"FOUND %s.%s p=%u %p",cn,n,pc,fa);}
             }
         }
     }
