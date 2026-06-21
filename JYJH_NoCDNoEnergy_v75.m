@@ -40,42 +40,44 @@ static int g_damageLimit=100, g_skinId=0, g_weaponId=0;
 static float g_speedMul=1.0f; // 游戏速度倍率 (timeScale) 1.0=正常
 
 // ===== Time.timeScale Hook =====
-typedef float (*GetTimeScaleFunc)(void);
-typedef void (*SetTimeScaleFunc)(float);
+// IL2CPP: Time.set_timeScale 是静态方法, IL2CPP签名 = (void *method, float value)
+// Time.get_timeScale 是静态方法, IL2CPP签名 = (void *method) -> float
+typedef float (*GetTimeScaleFunc)(void*);
+typedef void (*SetTimeScaleFunc)(void*, float);
 static void *g_fSetTimeScale=NULL; static SetTimeScaleFunc g_oSetTimeScale=NULL; static BOOL g_hSetTimeScale=NO;
 static void *g_fGetTimeScale=NULL; static GetTimeScaleFunc g_oGetTimeScale=NULL; static BOOL g_hGetTimeScale=NO;
 
-static void hSetTimeScale(float value) {
-    // 游戏设timeScale时, 如果用户开了加速, 用用户的值覆盖
+static void hSetTimeScale(void *method, float value) {
     if(g_speedMul > 1.0f) {
-        if(g_oSetTimeScale) g_oSetTimeScale(g_speedMul);
+        if(g_oSetTimeScale) g_oSetTimeScale(method, g_speedMul);
     } else {
-        if(g_oSetTimeScale) g_oSetTimeScale(value);
+        if(g_oSetTimeScale) g_oSetTimeScale(method, value);
     }
 }
 
-static float hGetTimeScale(void) {
-    float real = g_oGetTimeScale ? g_oGetTimeScale() : 1.0f;
+static float hGetTimeScale(void *method) {
+    float real = g_oGetTimeScale ? g_oGetTimeScale(method) : 1.0f;
     if(g_speedMul > 1.0f) return g_speedMul;
     return real;
 }
 
 // ===== BaseComponent.GameSpeed Hook =====
-typedef float (*GetGameSpeedFunc)(void*);
-typedef void (*SetGameSpeedFunc)(void*, float);
+// IL2CPP实例方法: set_GameSpeed(void *method, void *self, float value)
+typedef float (*GetGameSpeedFunc)(void*, void*);
+typedef void (*SetGameSpeedFunc)(void*, void*, float);
 static void *g_fSetGameSpeed=NULL; static SetGameSpeedFunc g_oSetGameSpeed=NULL; static BOOL g_hSetGameSpeed=NO;
 static void *g_fGetGameSpeed=NULL; static GetGameSpeedFunc g_oGetGameSpeed=NULL; static BOOL g_hGetGameSpeed=NO;
 
-static void hSetGameSpeed(void *self, float value) {
+static void hSetGameSpeed(void *method, void *self, float value) {
     if(g_speedMul > 1.0f) {
-        if(g_oSetGameSpeed) g_oSetGameSpeed(self, g_speedMul);
+        if(g_oSetGameSpeed) g_oSetGameSpeed(method, self, g_speedMul);
     } else {
-        if(g_oSetGameSpeed) g_oSetGameSpeed(self, value);
+        if(g_oSetGameSpeed) g_oSetGameSpeed(method, self, value);
     }
 }
 
-static float hGetGameSpeed(void *self) {
-    float real = g_oGetGameSpeed ? g_oGetGameSpeed(self) : 1.0f;
+static float hGetGameSpeed(void *method, void *self) {
+    float real = g_oGetGameSpeed ? g_oGetGameSpeed(method, self) : 1.0f;
     if(g_speedMul > 1.0f) return g_speedMul;
     return real;
 }
@@ -850,7 +852,7 @@ static void applyAllHooks(void){
     hookOneFunc(g_fGetGameSpeed,hGetGameSpeed,(void**)&g_oGetGameSpeed,&g_hGetGameSpeed,"get_GameSpeed");
     // 立即应用当前速度设置
     if(g_speedMul > 1.0f && g_hSetTimeScale) {
-        g_oSetTimeScale(g_speedMul);
+        g_oSetTimeScale(NULL, g_speedMul);
         jlog(@"timeScale set to %.1f immediately", g_speedMul);
     }
     jlog(@"applyAllHooks done");
@@ -1002,7 +1004,7 @@ static void togglePanel(void){
     g_speedMul=s.value;
     // v75: 直接通过timeScale控制游戏速度, 不再需要MoveStep hook
     if(g_hSetTimeScale && g_oSetTimeScale) {
-        g_oSetTimeScale(g_speedMul);
+        g_oSetTimeScale(NULL, g_speedMul);
     }
     g_speedLabel.text=[NSString stringWithFormat:@"游戏速度: %.1fx",g_speedMul];
     jlog(@"GameSpeed: %.1f (timeScale applied)",g_speedMul);
