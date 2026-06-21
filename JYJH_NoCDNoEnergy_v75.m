@@ -843,13 +843,12 @@ static void hookOneFunc(void *fa,void *hf,void **of,BOOL *hf2,const char *name){
 
 static void applyAllHooks(void){
     if(!g_fLimitDmg)findIL2CPP();
+    jlog(@"applyAllHooks: starting, limitDmg=%p", g_fLimitDmg);
     hookOneFunc(g_fLimitDmg,hLimitDmg,(void**)&g_oLimitDmg,&g_hLimitDmg,"limitDmg");
+    jlog(@"applyAllHooks: limitDmg done, now hooking timeScale");
     // v75: Time.timeScale hook - 游戏速度控制核心
     hookOneFunc(g_fSetTimeScale,hSetTimeScale,(void**)&g_oSetTimeScale,&g_hSetTimeScale,"set_timeScale");
     hookOneFunc(g_fGetTimeScale,hGetTimeScale,(void**)&g_oGetTimeScale,&g_hGetTimeScale,"get_timeScale");
-    // v75: BaseComponent.GameSpeed hook
-    hookOneFunc(g_fSetGameSpeed,hSetGameSpeed,(void**)&g_oSetGameSpeed,&g_hSetGameSpeed,"set_GameSpeed");
-    hookOneFunc(g_fGetGameSpeed,hGetGameSpeed,(void**)&g_oGetGameSpeed,&g_hGetGameSpeed,"get_GameSpeed");
     // 立即应用当前速度设置
     if(g_speedMul > 1.0f && g_hSetTimeScale) {
         g_oSetTimeScale(NULL, g_speedMul);
