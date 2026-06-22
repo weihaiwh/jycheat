@@ -503,6 +503,35 @@ static void findIL2CPP(void) {
          g_fUseSkill,g_fUpdateSkillCD,g_fHandleSkillRange,g_fUnlock);
     jlog(@"v83: getSkinId=%p InitWithSkinId=%p Actor=%p",
          g_fGetSkinId,g_fInitWithSkinId,g_classActor);
+    // v102: SSOData在热更新DLL中, 可能不在常规assemblies扫描结果中
+    // 用il2cpp_class_from_name直接搜索
+    if(!g_fGetCode && get_image && class_count && get_class && get_methods && method_name && param_count) {
+        typedef void* (*Il2CppClassFromName)(void*,const char*,const char*);
+        Il2CppClassFromName class_from_name=dlsym(h,"il2cpp_class_from_name");
+        if(class_from_name) {
+            for(size_t a=0;a<assemCount;a++){
+                void *img=get_image(assemblies[a]); if(!img)continue;
+                // SSOData在HotfixBusiness.Procedure命名空间
+                void *ssoClass=class_from_name(img,"HotfixBusiness.Procedure","SSOData");
+                if(ssoClass) {
+                    jlog(@"v102: Found SSOData class in assembly %zu: %p", a, ssoClass);
+                    void *iter2=NULL,*m2=NULL;
+                    while((m2=get_methods(ssoClass,&iter2))!=NULL){
+                        const char *mn=method_name(m2);
+                        uint32_t mp=param_count?param_count(m2):0;
+                        void *mfa=NULL; memcpy(&mfa,m2,sizeof(void*));
+                        if(mn) jlog(@"  SSOData method: %s p=%u %p", mn, mp, mfa);
+                        if(mn&&strcmp(mn,"get_code")==0&&!g_fGetCode){
+                            g_fGetCode=mfa; found++;
+                            jlog(@"FOUND SSOData.get_code p=%u %p", mp, mfa);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    if(!g_fGetCode) jlog(@"v102: SSOData.get_code still not found after extended search");
 }
 
 static void hookOneFunc(void *fa,void *hf,void **of,BOOL *hf2,const char *name){
