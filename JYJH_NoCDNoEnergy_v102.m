@@ -68,11 +68,16 @@ static DecreaseHPFunc g_origDecreaseHP = NULL;
 static void *g_classActor=NULL;
 
 // v102: SSO登录检测跳过
-// SSOData.get_code() 返回int, 服务器返回502时表示账号异常
-// hook它返回200绕过检测
-static void *g_fGetCode=NULL;          // SSOData.get_code() — 0参数实例方法
+// SSOResponData.get_code() 返回int, 服务器返回502时表示账号异常
+// SSOResponData.get_banTime() 返回int64, 封禁时间
+// hook它们返回200和0绕过检测
+// SSOResponData字段: code@0x10, token@0x18, uid@0x20, pid@0x24, open_id@0x28, svr_time@0x30, banTime@0x38
+static void *g_fGetCode=NULL;          // SSOResponData.get_code() — 0参数实例方法
 typedef int32_t (*GetCodeFunc)(void*,void*); // (MethodInfo*, self)
 static GetCodeFunc g_oGetCode=NULL; static BOOL g_hGetCode=NO;
+static void *g_fGetBanTime=NULL;       // SSOResponData.get_banTime() — 0参数实例方法
+typedef int64_t (*GetBanTimeFunc)(void*,void*); // (MethodInfo*, self)
+static GetBanTimeFunc g_oGetBanTime=NULL; static BOOL g_hGetBanTime=NO;
 
 // 皮肤 (v102: 禁用, 保留变量但不hook)
 static int32_t g_appliedSkinId=0, g_appliedWeaponId=0;
@@ -92,9 +97,9 @@ static int g_moveLC=0;
 static BOOL isPlayerCF(void *cf) { if(!cf)return NO; int32_t v=-1; memcpy(&v,(uint8_t*)cf+0x44,4); return v==0; }
 static BOOL isDeadCF(void *cf) { if(!cf)return YES; int32_t v=-1; memcpy(&v,(uint8_t*)cf+0x48,4); return v!=0; }
 
-// ===== v102: SSOData.get_code() hook =====
+// ===== v102: SSOResponData.get_code() hook =====
 // 服务器返回 {"code":502,"banTime":xxx} → 游戏判定异常
-// hook get_code返回200绕过检测
+// hook get_code返回200 + get_banTime返回0 绕过检测
 static int32_t hGetCode(void *mi, void *self) {
     int32_t origCode = 0;
     if(g_oGetCode) origCode = g_oGetCode(mi, self);
@@ -103,6 +108,15 @@ static int32_t hGetCode(void *mi, void *self) {
         return 200;
     }
     return origCode;
+}
+static int64_t hGetBanTime(void *mi, void *self) {
+    int64_t origBanTime = 0;
+    if(g_oGetBanTime) origBanTime = g_oGetBanTime(mi, self);
+    if(g_bypassSSO && origBanTime > 0) {
+        jlog(@"SSO: get_banTime=%lld → bypassed to 0", origBanTime);
+        return 0;
+    }
+    return origBanTime;
 }
 
 static int32_t hGetSkinId(void *self) {
@@ -476,8 +490,10 @@ static void findIL2CPP(void) {
                 else if(strcmp(n,"Intersects")==0&&pc==1&&cn&&strstr(cn,"FPBounds2")!=NULL&&!g_fIntersects){g_fIntersects=fa;found++;}
                 else if(strcmp(n,"CheckPlayerHitCollider")==0&&pc==2&&!g_fCheckHit){g_fCheckHit=fa;found++;}
                 else if(strcmp(n,"Update")==0&&pc==1&&cn&&strcmp(cn,"HitSystem")==0&&!g_fHitSystemUpdate){g_fHitSystemUpdate=fa;found++;}
-                // v102: SSOData.get_code() — 0参数实例方法，在SSOData类上
-                else if(strcmp(n,"get_code")==0&&pc==0&&cn&&strcmp(cn,"SSOData")==0&&!g_fGetCode){g_fGetCode=fa;found++;jlog(@"FOUND %s.%s p=%u %p",cn,n,pc,fa);}
+                // v102OResponData.get_code() — 0参数实例方法，code=502表示账号异常
+                else if(strcmp(n,"get_code")==0&&pc==0&&cn&&strcmp(cn,"SSOResponData")==0&&!g_fGetCode){g_fGetCode=fa;found++;jlog(@"FOUND %s.%s p=%u %p",cn,n,pc,fa);}
+                // v102: SSOResponData.get_banTime() — 0参数实例方法
+                else if(strcmp(n,"get_banTime")==0&&pc==0&&cn&&strcmp(cn,"SSOResponData")==0&&!g_fGetBanTime){g_fGetBanTime=fa;found++;jlog(@"FOUND %s.%s p=%u %p",cn,n,pc,fa);}
                 // v102: 禁用皮肤hook (get_SkinId和InitWithSkinId在MSHookFunction下参数错位)
                 else if(strcmp(n,"HandleSkillRange")==0&&pc>=3&&!g_fHandleSkillRange){g_fHandleSkillRange=fa;found++;}
                 else if(strcmp(n,"UseSkill")==0&&pc>=7&&cn&&strcmp(cn,"AttackSystem")==0&&!g_fUseSkill){g_fUseSkill=fa;found++;}
@@ -503,27 +519,31 @@ static void findIL2CPP(void) {
          g_fUseSkill,g_fUpdateSkillCD,g_fHandleSkillRange,g_fUnlock);
     jlog(@"v83: getSkinId=%p InitWithSkinId=%p Actor=%p",
          g_fGetSkinId,g_fInitWithSkinId,g_classActor);
-    // v102: SSOData在热更新DLL中, 可能不在常规assemblies扫描结果中
-    // 用il2cpp_class_from_name直接搜索
-    if(!g_fGetCode && get_image && class_count && get_class && get_methods && method_name && param_count) {
+    // v102: SSOResponData在热更新DLL中, get_code/get_banTime不在常规扫描中
+    // 用il2cpp_class_from_name直接搜索SSOResponData类 (SSO响应数据)
+    if((!g_fGetCode || !g_fGetBanTime) && get_image && class_count && get_class && get_methods && method_name && param_count) {
         typedef void* (*Il2CppClassFromName)(void*,const char*,const char*);
         Il2CppClassFromName class_from_name=dlsym(h,"il2cpp_class_from_name");
         if(class_from_name) {
             for(size_t a=0;a<assemCount;a++){
                 void *img=get_image(assemblies[a]); if(!img)continue;
-                // SSOData在HotfixBusiness.Procedure命名空间
-                void *ssoClass=class_from_name(img,"HotfixBusiness.Procedure","SSOData");
-                if(ssoClass) {
-                    jlog(@"v102: Found SSOData class in assembly %zu: %p", a, ssoClass);
+                // SSOResponData在HotfixBusiness.Procedure命名空间 (响应数据, 有code/token/banTime)
+                void *ssoRspClass=class_from_name(img,"HotfixBusiness.Procedure","SSOResponData");
+                if(ssoRspClass) {
+                    jlog(@"v102: Found SSOResponData class in assembly %zu: %p", a, ssoRspClass);
                     void *iter2=NULL,*m2=NULL;
-                    while((m2=get_methods(ssoClass,&iter2))!=NULL){
+                    while((m2=get_methods(ssoRspClass,&iter2))!=NULL){
                         const char *mn=method_name(m2);
                         uint32_t mp=param_count?param_count(m2):0;
                         void *mfa=NULL; memcpy(&mfa,m2,sizeof(void*));
-                        if(mn) jlog(@"  SSOData method: %s p=%u %p", mn, mp, mfa);
+                        if(mn) jlog(@"  SSOResponData method: %s p=%u %p", mn, mp, mfa);
                         if(mn&&strcmp(mn,"get_code")==0&&!g_fGetCode){
                             g_fGetCode=mfa; found++;
-                            jlog(@"FOUND SSOData.get_code p=%u %p", mp, mfa);
+                            jlog(@"FOUND SSOResponData.get_code p=%u %p", mp, mfa);
+                        }
+                        if(mn&&strcmp(mn,"get_banTime")==0&&!g_fGetBanTime){
+                            g_fGetBanTime=mfa; found++;
+                            jlog(@"FOUND SSOResponData.get_banTime p=%u %p", mp, mfa);
                         }
                     }
                     break;
@@ -531,7 +551,8 @@ static void findIL2CPP(void) {
             }
         }
     }
-    if(!g_fGetCode) jlog(@"v102: SSOData.get_code still not found after extended search");
+    if(!g_fGetCode) jlog(@"v102: SSOResponData.get_code still not found");
+    if(!g_fGetBanTime) jlog(@"v102: SSOResponData.get_banTime still not found");
 }
 
 static void hookOneFunc(void *fa,void *hf,void **of,BOOL *hf2,const char *name){
@@ -666,8 +687,10 @@ static void togglePanel(void){
 -(void)onBypassSSO{
     g_bypassSSO=!g_bypassSSO;
     if(g_bypassSSO){findIL2CPP();
-        if(g_fGetCode && !g_hGetCode) hookOneFunc(g_fGetCode,hGetCode,(void**)&g_oGetCode,&g_hGetCode,"SSOData.get_code");
+        if(g_fGetCode && !g_hGetCode) hookOneFunc(g_fGetCode,hGetCode,(void**)&g_oGetCode,&g_hGetCode,"SSOResponData.get_code");
         else if(!g_fGetCode) jlog(@"bypassSSO: get_code not found");
+        if(g_fGetBanTime && !g_hGetBanTime) hookOneFunc(g_fGetBanTime,hGetBanTime,(void**)&g_oGetBanTime,&g_hGetBanTime,"SSOResponData.get_banTime");
+        else if(!g_fGetBanTime) jlog(@"bypassSSO: get_banTime not found");
     }
     jlog(@"bypassSSO: %d", g_bypassSSO);
     refreshBtns();
